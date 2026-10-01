@@ -84,7 +84,7 @@ Panel {
         vpn.toggle()
       } else if (buttonCode === Qt.MiddleButton) {
         vpn.refresh()
-      } else if (buttonCode === Qt.LeftButton) {
+      } else {
         root.toggle()
       }
     }
@@ -136,39 +136,6 @@ Panel {
           id: column
           width: panelFlick.width
           spacing: Style.space(12)
-
-          // Package Missing Alert Banner
-          Rectangle {
-            visible: !vpn.pkgInstalled
-            width: parent.width
-            implicitHeight: missingBox.implicitHeight + Style.space(16)
-            color: Qt.rgba(root.urgent.r, root.urgent.g, root.urgent.b, 0.15)
-            border.color: root.urgent
-            border.width: 1
-            radius: Style.space(4)
-
-            ColumnLayout {
-              id: missingBox
-              anchors.fill: parent
-              anchors.margins: Style.space(8)
-              spacing: Style.space(6)
-
-              Text {
-                text: "globalprotect-openconnect is not installed"
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.sub
-                font.weight: Font.Bold
-                color: root.urgent
-                wrapMode: Text.WordWrap
-                Layout.fillWidth: true
-              }
-
-              Button {
-                text: "Install Package"
-                onClicked: vpn.installPackage()
-              }
-            }
-          }
 
           Item {
             id: header
