@@ -22,8 +22,14 @@ if [[ -f "$PID_FILE" ]]; then
   rm -f "$PID_FILE"
 fi
 
-# Fallback kill
-pkill -x gpclient 2>/dev/null || true
+# Kill background connect or launch-gui / gpgui processes
+pkill -f "gpclient connect" 2>/dev/null || true
+pkill -f "gpclient launch-gui" 2>/dev/null || true
+pkill -x gpgui 2>/dev/null || true
+pkill -x gpauth 2>/dev/null || true
+
+# Cleanup port / temp auth files if any
+rm -f /tmp/gpcallback.port 2>/dev/null || true
 
 echo "✓ VPN disconnected"
 omarchy-notification-send "GlobalProtect" "Disconnected" 2>/dev/null || true

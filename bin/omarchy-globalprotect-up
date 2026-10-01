@@ -87,13 +87,16 @@ if [[ -n "$BROWSER" ]]; then
   ARGS+=("--browser" "$BROWSER")
 fi
 
+# Ensure /tmp is used across pkexec for gpcallback handoff
+export TMPDIR=/tmp
+
 echo "==> Connecting to GlobalProtect VPN ($CONFIG_NAME)..."
 
 if [[ "$SAML" != "true" && -n "$PASSWORD" ]]; then
   ARGS+=("--passwd-on-stdin")
-  printf '%s\n' "$PASSWORD" | pkexec gpclient "${ARGS[@]}" &
+  printf '%s\n' "$PASSWORD" | pkexec env TMPDIR=/tmp gpclient "${ARGS[@]}" &
 else
-  pkexec gpclient "${ARGS[@]}" &
+  pkexec env TMPDIR=/tmp gpclient "${ARGS[@]}" &
 fi
 
 VPN_PID=$!
@@ -102,7 +105,7 @@ echo "$VPN_PID" > "$PID_FILE"
 sleep 3
 if kill -0 "$VPN_PID" 2>/dev/null; then
   echo "✓ GlobalProtect connection launched (PID: $VPN_PID)"
-  omarchy-notification-send "GlobalProtect" "Connected successfully" 2>/dev/null || true
+  omarchy-notification-send "GlobalProtect" "Connection process started..." 2>/dev/null || true
 else
   rm -f "$PID_FILE"
   echo "✗ GlobalProtect connection ended or cancelled."

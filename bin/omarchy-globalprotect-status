@@ -23,10 +23,15 @@ if [[ -f "$CONFIG_FILE" ]]; then
   portal=$(grep -i "^portal[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null | head -1 | sed 's/^portal[[:space:]]*=[[:space:]]*//' | tr -d '[:space:]' || echo "")
 fi
 
-# Check gpclient process
-if pgrep -x gpclient >/dev/null 2>&1; then
-  pid=$(pgrep -x gpclient | head -1 || echo "")
+# Check network interfaces (gpd0, gpd*, tun-gp*, or openconnect tun)
+vpn_dev=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^(gpd|tun)' | head -1 || true)
+
+# Find active gpclient connect process
+active_pid=$(pgrep -f "gpclient connect" | head -1 || true)
+
+if [[ -n "$active_pid" || -n "$vpn_dev" ]]; then
   status="connected"
+  pid="${active_pid:-}"
   if [[ -n "$pid" && -d "/proc/$pid" ]]; then
     start_time=$(stat -c %Y "/proc/$pid" 2>/dev/null || echo "")
     if [[ -n "$start_time" ]]; then
@@ -35,12 +40,12 @@ if pgrep -x gpclient >/dev/null 2>&1; then
     fi
   fi
 elif [[ -f "$PID_FILE" ]]; then
-  pid=$(cat "$PID_FILE" 2>/dev/null || echo "")
-  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+  file_pid=$(cat "$PID_FILE" 2>/dev/null || echo "")
+  if [[ -n "$file_pid" ]] && kill -0 "$file_pid" 2>/dev/null && grep -qa "connect" "/proc/$file_pid/cmdline" 2>/dev/null; then
     status="connected"
+    pid="$file_pid"
   else
     rm -f "$PID_FILE"
-    pid=""
   fi
 fi
 
