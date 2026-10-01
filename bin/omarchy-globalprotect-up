@@ -1,7 +1,6 @@
 #!/bin/bash
 # omarchy:summary=Connect to GlobalProtect VPN gateway
 # omarchy:args=[config_name]
-# omarchy:requires-sudo=true
 
 set -euo pipefail
 
@@ -13,9 +12,6 @@ mkdir -p "$RUN_DIR"
 chmod 700 "$RUN_DIR"
 PID_FILE="$RUN_DIR/${CONFIG_NAME}.pid"
 LOCK_FILE="$RUN_DIR/${CONFIG_NAME}.lock"
-
-readonly HELPER="/usr/local/lib/omarchy/globalprotect-helper"
-readonly CALLING_USER="$(id -un)"
 
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
@@ -39,18 +35,67 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
   exit 1
 fi
 
-exec_vpn() {
-  if sudo -n -l "$HELPER" >/dev/null 2>&1; then
-    sudo "$HELPER" connect "$CALLING_USER" "$CONFIG_NAME" "$@"
-  elif command -v pkexec >/dev/null 2>&1; then
-    pkexec "$HELPER" connect "$CALLING_USER" "$CONFIG_NAME" "$@"
+get_cfg() {
+  local k="$1"
+  local line
+  line=$(grep -i "^[[:space:]]*${k}[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null | head -1 || true)
+  if [[ -n "$line" ]]; then
+    echo "$line" | sed 's/^[^=]*=[[:space:]]*//' | sed 's/[[:space:]]*$//'
   else
-    sudo "$HELPER" connect "$CALLING_USER" "$CONFIG_NAME" "$@"
+    echo ""
   fi
 }
 
+PORTAL=$(get_cfg "portal")
+if [[ -z "$PORTAL" ]]; then
+  echo "Error: portal is not configured in $CONFIG_FILE"
+  exit 1
+fi
+
+GATEWAY=$(get_cfg "gateway")
+USERNAME=$(get_cfg "username")
+PASSWORD=$(get_cfg "password")
+SAML=$(get_cfg "saml")
+BROWSER=$(get_cfg "browser")
+IGNORE_TLS=$(get_cfg "ignore-tls-errors")
+FIX_OPENSSL=$(get_cfg "fix-openssl")
+NO_DTLS=$(get_cfg "no-dtls")
+
+ARGS=("connect" "$PORTAL")
+
+if [[ -n "$GATEWAY" ]]; then
+  ARGS+=("-g" "$GATEWAY")
+fi
+
+if [[ -n "$USERNAME" ]]; then
+  ARGS+=("-u" "$USERNAME")
+fi
+
+if [[ "$IGNORE_TLS" == "true" ]]; then
+  ARGS+=("--ignore-tls-errors")
+fi
+
+if [[ "$FIX_OPENSSL" == "true" ]]; then
+  ARGS+=("--fix-openssl")
+fi
+
+if [[ "$NO_DTLS" == "true" ]]; then
+  ARGS+=("--no-dtls")
+fi
+
+if [[ -n "$BROWSER" ]]; then
+  ARGS+=("--browser" "$BROWSER")
+fi
+
 echo "==> Connecting to GlobalProtect VPN ($CONFIG_NAME)..."
-exec_vpn &
+
+if [[ "$SAML" != "true" && -n "$PASSWORD" ]]; then
+  ARGS+=("--passwd-on-stdin")
+  printf '%s\n' "$PASSWORD" | pkexec gpclient "${ARGS[@]}" &
+else
+  pkexec gpclient "${ARGS[@]}" &
+fi
+
 VPN_PID=$!
 echo "$VPN_PID" > "$PID_FILE"
 
@@ -60,5 +105,5 @@ if kill -0 "$VPN_PID" 2>/dev/null; then
   omarchy-notification-send "GlobalProtect" "Connected successfully" 2>/dev/null || true
 else
   rm -f "$PID_FILE"
-  echo "✗ GlobalProtect connection ended or failed."
+  echo "✗ GlobalProtect connection ended or cancelled."
 fi

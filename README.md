@@ -5,19 +5,23 @@ An [Omarchy](https://omarchy.org/) shell bar widget and CLI client for Palo Alto
 ## Features
 
 - **Bar Widget**: Native Omarchy shell bar widget with connection status and quick toggle.
-- **Config UI**: Click to open settings directly in the bar popup (portal server, username, SAML SSO toggle, browser selection).
-- **Auto Package Detection**: Shows an interactive install button directly in the UI if `globalprotect-openconnect` is missing.
-- **Security-First Root Helper**: Uses a dedicated, whitelist-only root helper `/usr/local/lib/omarchy/globalprotect-helper` with sudoers NOPASSWD instead of granting blanket root permissions.
-- **CLI Interface**: Full CLI suite (`omarchy-globalprotect` with subcommands `up`, `down`, `status`, `config`).
+- **Config UI**: Click to open settings directly in the bar popup (portal server, gateway, username, SAML SSO toggle, browser selection).
+- **Auto Package Detection**: Shows an interactive install button directly in the bar popup if `globalprotect-openconnect` is not found.
+- **Polkit Integration**: Elevates privileges natively using `pkexec` when initiating connection.
+- **CLI Interface**: Full CLI suite (`omarchy-globalprotect` with subcommands `up`, `down`, `status`, `config`, `install-deps`).
 
 ## Installation
 
-```bash
-# 1. Symlink or clone into your Omarchy plugins directory:
-ln -s ~/Projects/omarchy-globalprotect ~/.config/omarchy/plugins/setiapam.globalprotect
+Standard Omarchy plugin installation via Git:
 
-# 2. Run the helper installer (sets up sudoers rule & links commands to ~/.local/bin):
-~/.config/omarchy/plugins/setiapam.globalprotect/bin/omarchy-install-service-globalprotect
+```bash
+omarchy plugin add https://github.com/setiapam/omarchy-globalprotect.git --enable
+```
+
+If `globalprotect-openconnect` is not installed yet, the widget will detect it and offer an **Install Package** button, or install it manually:
+
+```bash
+omarchy-pkg-add globalprotect-openconnect
 ```
 
 ## CLI Usage
