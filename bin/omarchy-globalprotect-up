@@ -1,5 +1,5 @@
 #!/bin/bash
-# omarchy:summary=Connect to GlobalProtect VPN gateway
+# omarchy:summary=Connect to GlobalProtect VPN
 # omarchy:args=[config_name]
 
 set -euo pipefail
@@ -7,106 +7,30 @@ set -euo pipefail
 CONFIG_NAME="${1:-config}"
 CONFIG_DIR="$HOME/.config/globalprotect"
 CONFIG_FILE="$CONFIG_DIR/$CONFIG_NAME"
-RUN_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omarchy-globalprotect"
-mkdir -p "$RUN_DIR"
-chmod 700 "$RUN_DIR"
-PID_FILE="$RUN_DIR/${CONFIG_NAME}.pid"
-LOCK_FILE="$RUN_DIR/${CONFIG_NAME}.lock"
 
-exec 9>"$LOCK_FILE"
-if ! flock -n 9; then
-  echo "Another instance of globalprotect-up is already running."
-  exit 0
+PORTAL="vpn.bps.go.id"
+USERNAME="setia.pambudi"
+BROWSER="default"
+
+if [[ -f "$CONFIG_FILE" ]]; then
+  p=$(grep -i "^portal=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- | tr -d ' ' || true)
+  [[ -n "$p" ]] && PORTAL="$p"
+  u=$(grep -i "^username=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- | tr -d ' ' || true)
+  [[ -n "$u" ]] && USERNAME="$u"
+  b=$(grep -i "^browser=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- | tr -d ' ' || true)
+  [[ -n "$b" ]] && BROWSER="$b"
 fi
 
-if ! command -v gpclient >/dev/null 2>&1; then
-  echo "Error: gpclient is not installed."
-  omarchy-notification-send "GlobalProtect" "Error: globalprotect-openconnect is not installed." 2>/dev/null || true
-  exit 1
+# Ensure PanGPA is running in user session
+if ! pgrep -u "$USER" PanGPA >/dev/null 2>&1; then
+  /opt/paloaltonetworks/globalprotect/PanGPA start &
+  sleep 1
 fi
 
-if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
-  echo "VPN is already connected (PID: $(cat "$PID_FILE"))"
-  exit 0
+# Set custom browser if configured
+if [[ -n "$BROWSER" && "$BROWSER" != "default" ]]; then
+  export BROWSER="$BROWSER"
 fi
 
-if [[ ! -f "$CONFIG_FILE" ]]; then
-  echo "Error: Config file not found: $CONFIG_FILE"
-  exit 1
-fi
-
-get_cfg() {
-  local k="$1"
-  local line
-  line=$(grep -i "^[[:space:]]*${k}[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null | head -1 || true)
-  if [[ -n "$line" ]]; then
-    echo "$line" | sed 's/^[^=]*=[[:space:]]*//' | sed 's/[[:space:]]*$//'
-  else
-    echo ""
-  fi
-}
-
-PORTAL=$(get_cfg "portal")
-if [[ -z "$PORTAL" ]]; then
-  echo "Error: portal is not configured in $CONFIG_FILE"
-  exit 1
-fi
-
-GATEWAY=$(get_cfg "gateway")
-USERNAME=$(get_cfg "username")
-PASSWORD=$(get_cfg "password")
-SAML=$(get_cfg "saml")
-BROWSER=$(get_cfg "browser")
-IGNORE_TLS=$(get_cfg "ignore-tls-errors")
-FIX_OPENSSL=$(get_cfg "fix-openssl")
-NO_DTLS=$(get_cfg "no-dtls")
-
-ARGS=("connect" "$PORTAL")
-
-if [[ -n "$GATEWAY" ]]; then
-  ARGS+=("-g" "$GATEWAY")
-fi
-
-if [[ -n "$USERNAME" ]]; then
-  ARGS+=("-u" "$USERNAME")
-fi
-
-if [[ "$IGNORE_TLS" == "true" ]]; then
-  ARGS+=("--ignore-tls-errors")
-fi
-
-if [[ "$FIX_OPENSSL" == "true" ]]; then
-  ARGS+=("--fix-openssl")
-fi
-
-if [[ "$NO_DTLS" == "true" ]]; then
-  ARGS+=("--no-dtls")
-fi
-
-if [[ -n "$BROWSER" ]]; then
-  ARGS+=("--browser" "$BROWSER")
-fi
-
-# Ensure /tmp is used across pkexec for gpcallback handoff
-export TMPDIR=/tmp
-
-echo "==> Connecting to GlobalProtect VPN ($CONFIG_NAME)..."
-
-if [[ "$SAML" != "true" && -n "$PASSWORD" ]]; then
-  ARGS+=("--passwd-on-stdin")
-  printf '%s\n' "$PASSWORD" | pkexec env TMPDIR=/tmp gpclient "${ARGS[@]}" &
-else
-  pkexec env TMPDIR=/tmp gpclient "${ARGS[@]}" &
-fi
-
-VPN_PID=$!
-echo "$VPN_PID" > "$PID_FILE"
-
-sleep 3
-if kill -0 "$VPN_PID" 2>/dev/null; then
-  echo "✓ GlobalProtect connection launched (PID: $VPN_PID)"
-  omarchy-notification-send "GlobalProtect" "Connection process started..." 2>/dev/null || true
-else
-  rm -f "$PID_FILE"
-  echo "✗ GlobalProtect connection ended or cancelled."
-fi
+echo "Connecting to GlobalProtect ($PORTAL) for user $USERNAME..."
+globalprotect connect -p "$PORTAL" -u "$USERNAME" &

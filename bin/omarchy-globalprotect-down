@@ -4,32 +4,5 @@
 
 set -euo pipefail
 
-CONFIG_NAME="${1:-config}"
-RUN_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omarchy-globalprotect"
-PID_FILE="$RUN_DIR/${CONFIG_NAME}.pid"
-
-echo "==> Disconnecting GlobalProtect VPN..."
-
-if command -v gpclient >/dev/null 2>&1; then
-  gpclient disconnect --wait 5 2>/dev/null || true
-fi
-
-if [[ -f "$PID_FILE" ]]; then
-  pid=$(cat "$PID_FILE" 2>/dev/null || true)
-  if [[ -n "$pid" ]]; then
-    kill "$pid" 2>/dev/null || true
-  fi
-  rm -f "$PID_FILE"
-fi
-
-# Kill background connect or launch-gui / gpgui processes
-pkill -f "gpclient connect" 2>/dev/null || true
-pkill -f "gpclient launch-gui" 2>/dev/null || true
-pkill -x gpgui 2>/dev/null || true
-pkill -x gpauth 2>/dev/null || true
-
-# Cleanup port / temp auth files if any
-rm -f /tmp/gpcallback.port 2>/dev/null || true
-
-echo "✓ VPN disconnected"
+globalprotect disconnect || true
 omarchy-notification-send "GlobalProtect" "Disconnected" 2>/dev/null || true

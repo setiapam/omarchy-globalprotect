@@ -1,37 +1,36 @@
 #!/bin/bash
-# omarchy:summary=Check GlobalProtect VPN status
+# omarchy:summary=Check GlobalProtect connection status
 # omarchy:args=[config_name]
 
 set -euo pipefail
 
 CONFIG_NAME="${1:-config}"
-RUN_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omarchy-globalprotect"
-PID_FILE="$RUN_DIR/${CONFIG_NAME}.pid"
 CONFIG_FILE="$HOME/.config/globalprotect/$CONFIG_NAME"
 
 status="disconnected"
 pid=""
-portal=""
+portal="vpn.bps.go.id"
 uptime_secs="null"
 pkg_installed="false"
 
-if command -v gpclient >/dev/null 2>&1; then
+if command -v globalprotect >/dev/null 2>&1; then
   pkg_installed="true"
 fi
 
 if [[ -f "$CONFIG_FILE" ]]; then
-  portal=$(grep -i "^portal[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null | head -1 | sed 's/^portal[[:space:]]*=[[:space:]]*//' | tr -d '[:space:]' || echo "")
+  cfg_p=$(grep -i "^portal=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- | tr -d ' ' || true)
+  [[ -n "$cfg_p" ]] && portal="$cfg_p"
 fi
 
-# Check network interfaces (gpd0, gpd*, tun-gp*, or openconnect tun)
-vpn_dev=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^(gpd|tun)' | head -1 || true)
-
-# Find active gpclient connect process
-active_pid=$(pgrep -f "gpclient connect" | head -1 || true)
-
-if [[ -n "$active_pid" || -n "$vpn_dev" ]]; then
+# Check if gpd0 or tun interface is up
+if ip link show gpd0 >/dev/null 2>&1 && [[ "$(cat /sys/class/net/gpd0/operstate 2>/dev/null)" == "up" ]]; then
   status="connected"
-  pid="${active_pid:-}"
+elif ip link show gpd0 >/dev/null 2>&1; then
+  status="connected"
+fi
+
+if [[ "$status" == "connected" ]]; then
+  pid=$(pgrep -x PanGPS | head -1 || echo "")
   if [[ -n "$pid" && -d "/proc/$pid" ]]; then
     start_time=$(stat -c %Y "/proc/$pid" 2>/dev/null || echo "")
     if [[ -n "$start_time" ]]; then
@@ -39,15 +38,7 @@ if [[ -n "$active_pid" || -n "$vpn_dev" ]]; then
       uptime_secs=$(( now - start_time ))
     fi
   fi
-elif [[ -f "$PID_FILE" ]]; then
-  file_pid=$(cat "$PID_FILE" 2>/dev/null || echo "")
-  if [[ -n "$file_pid" ]] && kill -0 "$file_pid" 2>/dev/null && grep -qa "connect" "/proc/$file_pid/cmdline" 2>/dev/null; then
-    status="connected"
-    pid="$file_pid"
-  else
-    rm -f "$PID_FILE"
-  fi
 fi
 
-# Print single-line JSON
+# Print single-line JSON to prevent SplitParser line-buffering JSON.parse issues
 echo "{\"status\":\"$status\",\"pid\":\"$pid\",\"portal\":\"$portal\",\"config\":\"$CONFIG_NAME\",\"pkgInstalled\":$pkg_installed,\"uptimeSeconds\":$uptime_secs}"
