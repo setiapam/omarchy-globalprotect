@@ -80,9 +80,13 @@ Panel {
     }
     
     onPressed: function(buttonCode) {
-      if (buttonCode === Qt.RightButton) vpn.toggle()
-      else if (buttonCode === Qt.MiddleButton) vpn.refresh()
-      else root.toggle()
+      if (buttonCode === Qt.RightButton) {
+        vpn.toggle()
+      } else if (buttonCode === Qt.MiddleButton) {
+        vpn.refresh()
+      } else if (buttonCode === Qt.LeftButton) {
+        root.toggle()
+      }
     }
     
     SequentialAnimation on opacity {
@@ -210,7 +214,7 @@ Panel {
               trailingControl: Component {
                 ToggleSwitch {
                   checked: vpn.uiActive
-                  busy: vpn.busy || vpn.status === "connecting"
+                  busy: vpn.busy || vpn.status === "connecting" || vpn.status === "disconnecting"
                   hasCursor: header.ringVisible
                   foreground: hero.foreground
                   onHovered: function(on) { if (on) header.focusHero() }
