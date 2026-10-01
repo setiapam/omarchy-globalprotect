@@ -1,102 +1,49 @@
 #!/bin/bash
-# omarchy:summary=Read or write GlobalProtect VPN config
-# omarchy:args=[action] [key] [value]
+# omarchy:summary=Read or write GlobalProtect configuration
+# omarchy:args=[action] [args...]
 
 set -euo pipefail
-
-ACTION="${1:-read-all}"
 
 CONFIG_DIR="$HOME/.config/globalprotect"
 CONFIG_FILE="$CONFIG_DIR/config"
 mkdir -p "$CONFIG_DIR"
 
-if [[ ! -f "$CONFIG_FILE" ]]; then
-  touch "$CONFIG_FILE"
-fi
+action="${1:-read-all}"
 
-get_val() {
-  local k="$1"
-  local line
-  line=$(grep -i "^[[:space:]]*${k}[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null | head -1 || true)
-  if [[ -n "$line" ]]; then
-    echo "$line" | sed 's/^[^=]*=[[:space:]]*//' | sed 's/[[:space:]]*$//'
-  else
-    echo ""
-  fi
-}
+case "$action" in
+  read-all)
+    portal="vpn.bps.go.id"
+    username="setia.pambudi"
+    browser="brave"
 
-set_val() {
-  local k="$1"
-  local v="$2"
-  if grep -qi "^[[:space:]]*#\?[[:space:]]*${k}[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null; then
-    if [[ -z "$v" ]]; then
-      sed -i "s/^[[:space:]]*#\?[[:space:]]*${k}[[:space:]]*=.*/# ${k} = /" "$CONFIG_FILE"
-    else
-      sed -i "s/^[[:space:]]*#\?[[:space:]]*${k}[[:space:]]*=.*/${k} = ${v}/" "$CONFIG_FILE"
+    if [[ -f "$CONFIG_FILE" ]]; then
+      p=$(grep -i "^portal=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- | tr -d ' ' || true)
+      [[ -n "$p" ]] && portal="$p"
+      u=$(grep -i "^username=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- | tr -d ' ' || true)
+      [[ -n "$u" ]] && username="$u"
+      b=$(grep -i "^browser=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- | tr -d ' ' || true)
+      [[ -n "$b" ]] && browser="$b"
     fi
-  else
-    if [[ -n "$v" ]]; then
-      echo "${k} = ${v}" >> "$CONFIG_FILE"
-    fi
-  fi
-}
 
-case "$ACTION" in
-  "read-all")
-    portal=$(get_val "portal")
-    gateway=$(get_val "gateway")
-    username=$(get_val "username")
-    password=$(get_val "password")
-    saml=$(get_val "saml")
-    browser=$(get_val "browser")
-    ignore_tls=$(get_val "ignore-tls-errors")
-    fix_openssl=$(get_val "fix-openssl")
-    no_dtls=$(get_val "no-dtls")
-
-    cat <<EOF
-{
-  "portal": "$portal",
-  "gateway": "$gateway",
-  "username": "$username",
-  "password": "$password",
-  "saml": ${saml:-true},
-  "browser": "${browser:-default}",
-  "ignoreTlsErrors": ${ignore_tls:-false},
-  "fixOpenssl": ${fix_openssl:-false},
-  "noDtls": ${no_dtls:-false}
-}
-EOF
+    echo "{\"portal\":\"$portal\",\"username\":\"$username\",\"browser\":\"$browser\"}"
     ;;
 
-  "write-all")
-    # Args: portal gateway username password saml browser ignoreTls fixOpenssl noDtls
-    PORTAL="${2:-}"
-    GATEWAY="${3:-}"
-    USER="${4:-}"
-    PASS="${5:-}"
-    SAML="${6:-true}"
-    BROWSER="${7:-default}"
-    IGNORE_TLS="${8:-false}"
-    FIX_OPENSSL="${9:-false}"
-    NO_DTLS="${10:-false}"
+  write)
+    portal="${2:-vpn.bps.go.id}"
+    username="${3:-setia.pambudi}"
+    browser="${4:-brave}"
 
-    set_val "portal" "$PORTAL"
-    set_val "gateway" "$GATEWAY"
-    set_val "username" "$USER"
-    set_val "password" "$PASS"
-    set_val "saml" "$SAML"
-    set_val "browser" "$BROWSER"
-    set_val "ignore-tls-errors" "$IGNORE_TLS"
-    set_val "fix-openssl" "$FIX_OPENSSL"
-    set_val "no-dtls" "$NO_DTLS"
-
-    echo "✓ Configuration updated successfully"
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    "$SCRIPT_DIR/omarchy-globalprotect-down" >/dev/null 2>&1 || true
+    cat << CFGEOF > "$CONFIG_FILE"
+# GlobalProtect VPN Configuration for BPS
+portal = $portal
+username = $username
+browser = $browser
+CFGEOF
+    echo "{\"status\":\"ok\"}"
     ;;
 
   *)
-    echo "Usage: omarchy-globalprotect-config [read-all|write-all]"
+    echo "Usage: $0 [read-all|write <portal> <username> <browser>]"
     exit 1
     ;;
 esac

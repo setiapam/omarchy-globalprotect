@@ -17,16 +17,9 @@ ColumnLayout {
     property color dim: Qt.darker(foreground, 1.55)
     property string fontFamily: Style.font.family
 
-    // Form Properties
-    property string portal: ""
-    property string gateway: ""
-    property bool isSaml: true
-    property string username: ""
-    property string password: ""
-    property string browser: "default"
-    property bool ignoreTls: false
-    property bool fixOpenssl: false
-    property bool noDtls: false
+    property string portal: "vpn.bps.go.id"
+    property string username: "setia.pambudi"
+    property string browser: "brave"
 
     spacing: Style.space(12)
 
@@ -40,247 +33,141 @@ ColumnLayout {
             onStreamFinished: {
                 try {
                     let data = JSON.parse(text)
-                    configPanel.portal = data.portal || ""
-                    configPanel.gateway = data.gateway || ""
-                    configPanel.isSaml = (data.saml !== undefined) ? data.saml : true
-                    configPanel.username = data.username || ""
-                    configPanel.password = data.password || ""
-                    configPanel.browser = data.browser || "default"
-                    configPanel.ignoreTls = data.ignoreTlsErrors || false
-                    configPanel.fixOpenssl = data.fixOpenssl || false
-                    configPanel.noDtls = data.noDtls || false
-                } catch (e) {
-                    console.warn("GlobalProtect: Failed to parse config JSON:", e)
-                }
+                    configPanel.portal = data.portal || "vpn.bps.go.id"
+                    configPanel.username = data.username || "setia.pambudi"
+                    configPanel.browser = data.browser || "brave"
+                } catch(e) {}
             }
         }
     }
 
     Process {
         id: saveProc
-        command: [
-            pluginDir + "/bin/omarchy-globalprotect-config",
-            "write-all",
-            portalInput.text.trim(),
-            gwInput.text.trim(),
-            userInput.text.trim(),
-            passInput.text,
-            samlSwitch.checked ? "true" : "false",
-            browserInput.text.trim(),
-            tlsSwitch.checked ? "true" : "false",
-            opensslSwitch.checked ? "true" : "false",
-            dtlsSwitch.checked ? "true" : "false"
-        ]
-        onExited: {
-            notifyProc.running = true
-            configPanel.configSaved()
-            configPanel.closeRequested()
+        stdout: StdioCollector {
+            waitForEnd: true
+            onStreamFinished: {
+                configPanel.configSaved()
+                configPanel.closeRequested()
+            }
         }
     }
 
-    Process {
-        id: notifyProc
-        command: ["notify-send", "-a", "GlobalProtect", "-i", "network-vpn", "Configuration Saved", "GlobalProtect settings updated successfully."]
+    function loadConfig() {
+        if (!readProc.running) readProc.running = true
     }
 
-    function loadConfig() { readProc.running = true }
-    function saveConfig() { saveProc.running = true }
+    function saveConfig() {
+        if (saveProc.running) return
+        saveProc.command = [
+            "bash", "-c",
+            pluginDir + "/bin/omarchy-globalprotect-config write '" + portalInput.text + "' '" + usernameInput.text + "' '" + browserInput.text + "'"
+        ]
+        saveProc.running = true
+    }
 
     // Header
     RowLayout {
         Layout.fillWidth: true
-        Layout.bottomMargin: Style.space(4)
-
         Text {
-            text: "Settings"
-            font.family: configPanel.fontFamily
-            font.pixelSize: Style.font.title
-            font.weight: Font.DemiBold
+            text: "Konfigurasi GlobalProtect"
             color: configPanel.foreground
-        }
-
-        Item { Layout.fillWidth: true }
-
-        Button {
-            text: "✕"
-            onClicked: configPanel.closeRequested()
+            font.family: configPanel.fontFamily
+            font.pixelSize: Style.fontSize("sm")
+            font.weight: Font.Bold
+            Layout.fillWidth: true
         }
     }
 
-    // Portal Server
+    // Portal
     ColumnLayout {
         Layout.fillWidth: true
-        spacing: Style.space(2)
-
+        spacing: Style.space(4)
         Text {
-            text: "Portal Server"
-            font.family: configPanel.fontFamily
-            font.pixelSize: Style.font.sub
+            text: "Portal VPN"
             color: configPanel.dim
+            font.family: configPanel.fontFamily
+            font.pixelSize: Style.fontSize("xs")
         }
-
         TextField {
             id: portalInput
-            Layout.fillWidth: true
             text: configPanel.portal
-            placeholderText: "vpn.bps.go.id"
-            font.family: configPanel.fontFamily
-            font.pixelSize: Style.font.body
-        }
-    }
-
-    // Gateway (Optional)
-    ColumnLayout {
-        Layout.fillWidth: true
-        spacing: Style.space(2)
-
-        Text {
-            text: "Gateway (Optional)"
-            font.family: configPanel.fontFamily
-            font.pixelSize: Style.font.sub
-            color: configPanel.dim
-        }
-
-        TextField {
-            id: gwInput
             Layout.fillWidth: true
-            text: configPanel.gateway
-            placeholderText: "Leave blank to match portal"
-            font.family: configPanel.fontFamily
-            font.pixelSize: Style.font.body
-        }
-    }
-
-    // SAML SSO Toggle
-    RowLayout {
-        Layout.fillWidth: true
-        spacing: Style.space(8)
-
-        Text {
-            text: "Use SAML / SSO Login"
-            font.family: configPanel.fontFamily
-            font.pixelSize: Style.font.body
             color: configPanel.foreground
-            Layout.fillWidth: true
-        }
-
-        Switch {
-            id: samlSwitch
-            checked: configPanel.isSaml
+            font.family: configPanel.fontFamily
+            font.pixelSize: Style.fontSize("xs")
+            background: Rectangle {
+                color: Qt.rgba(1, 1, 1, 0.05)
+                border.color: configPanel.dim
+                radius: 4
+            }
         }
     }
 
     // Username
     ColumnLayout {
         Layout.fillWidth: true
-        spacing: Style.space(2)
-
+        spacing: Style.space(4)
         Text {
-            text: "Username"
-            font.family: configPanel.fontFamily
-            font.pixelSize: Style.font.sub
+            text: "Username (SSO BPS)"
             color: configPanel.dim
+            font.family: configPanel.fontFamily
+            font.pixelSize: Style.fontSize("xs")
         }
-
         TextField {
-            id: userInput
-            Layout.fillWidth: true
+            id: usernameInput
             text: configPanel.username
-            placeholderText: "setia.pambudi"
-            font.family: configPanel.fontFamily
-            font.pixelSize: Style.font.body
-        }
-    }
-
-    // Password (only shown if SAML is false)
-    ColumnLayout {
-        Layout.fillWidth: true
-        spacing: Style.space(2)
-        visible: !samlSwitch.checked
-
-        Text {
-            text: "Password"
-            font.family: configPanel.fontFamily
-            font.pixelSize: Style.font.sub
-            color: configPanel.dim
-        }
-
-        TextField {
-            id: passInput
             Layout.fillWidth: true
-            text: configPanel.password
-            echoMode: TextInput.Password
-            placeholderText: "••••••••"
+            color: configPanel.foreground
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.font.body
+            font.pixelSize: Style.fontSize("xs")
+            background: Rectangle {
+                color: Qt.rgba(1, 1, 1, 0.05)
+                border.color: configPanel.dim
+                radius: 4
+            }
         }
     }
 
-    // SSO Browser
+    // Browser
     ColumnLayout {
         Layout.fillWidth: true
-        spacing: Style.space(2)
-        visible: samlSwitch.checked
-
+        spacing: Style.space(4)
         Text {
-            text: "SSO Browser"
-            font.family: configPanel.fontFamily
-            font.pixelSize: Style.font.sub
+            text: "Browser SAML (brave, firefox, chrome, default)"
             color: configPanel.dim
+            font.family: configPanel.fontFamily
+            font.pixelSize: Style.fontSize("xs")
         }
-
         TextField {
             id: browserInput
-            Layout.fillWidth: true
             text: configPanel.browser
-            placeholderText: "default (or remote, brave, firefox)"
+            Layout.fillWidth: true
+            color: configPanel.foreground
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.font.body
+            font.pixelSize: Style.fontSize("xs")
+            background: Rectangle {
+                color: Qt.rgba(1, 1, 1, 0.05)
+                border.color: configPanel.dim
+                radius: 4
+            }
         }
     }
 
-    // Advanced Toggles
+    // Buttons
     RowLayout {
         Layout.fillWidth: true
-        Text {
-            text: "Ignore TLS Errors"
-            font.family: configPanel.fontFamily
-            font.pixelSize: Style.font.sub
-            color: configPanel.dim
-            Layout.fillWidth: true
-        }
-        Switch { id: tlsSwitch; checked: configPanel.ignoreTls }
-    }
+        spacing: Style.space(8)
 
-    RowLayout {
-        Layout.fillWidth: true
-        Text {
-            text: "OpenSSL Fix (Legacy)"
-            font.family: configPanel.fontFamily
-            font.pixelSize: Style.font.sub
-            color: configPanel.dim
+        Button {
+            text: "Batal"
             Layout.fillWidth: true
+            onClicked: configPanel.closeRequested()
         }
-        Switch { id: opensslSwitch; checked: configPanel.fixOpenssl }
-    }
 
-    RowLayout {
-        Layout.fillWidth: true
-        Text {
-            text: "Disable DTLS"
-            font.family: configPanel.fontFamily
-            font.pixelSize: Style.font.sub
-            color: configPanel.dim
+        Button {
+            text: "Simpan"
             Layout.fillWidth: true
+            onClicked: configPanel.saveConfig()
         }
-        Switch { id: dtlsSwitch; checked: configPanel.noDtls }
-    }
-
-    // Save Button
-    Button {
-        Layout.fillWidth: true
-        Layout.topMargin: Style.space(4)
-        text: "Save & Apply"
-        onClicked: configPanel.saveConfig()
     }
 }

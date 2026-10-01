@@ -21,6 +21,9 @@ if [[ -f "$CONFIG_FILE" ]]; then
   [[ -n "$b" ]] && BROWSER="$b"
 fi
 
+# Clean up any stale cli connect instances
+pkill -x globalprotect 2>/dev/null || true
+
 # Ensure PanGPA is running in user session
 if ! pgrep -u "$USER" PanGPA >/dev/null 2>&1; then
   /opt/paloaltonetworks/globalprotect/PanGPA start &

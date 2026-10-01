@@ -4,5 +4,7 @@
 
 set -euo pipefail
 
+# Terminate active connect CLI command and issue disconnect
+pkill -x globalprotect 2>/dev/null || true
 globalprotect disconnect || true
 omarchy-notification-send "GlobalProtect" "Disconnected" 2>/dev/null || true
