@@ -22,10 +22,16 @@ if [[ -f "$CONFIG_FILE" ]]; then
   [[ -n "$cfg_p" ]] && portal="$cfg_p"
 fi
 
-# Check if gpd0 or tun interface is up
-if ip link show gpd0 >/dev/null 2>&1 && [[ "$(cat /sys/class/net/gpd0/operstate 2>/dev/null)" == "up" ]]; then
-  status="connected"
-elif ip link show gpd0 >/dev/null 2>&1; then
+# Check status via globalprotect CLI directly
+gp_status=$(globalprotect show --status 2>/dev/null | grep -i "GlobalProtect status:" | tr '[:upper:]' '[:lower:]' || echo "")
+
+if [[ "$gp_status" =~ (connected|connecting) ]] && ! [[ "$gp_status" =~ (disconnected|disabled) ]]; then
+  if [[ "$gp_status" =~ "connected" ]]; then
+    status="connected"
+  else
+    status="connecting"
+  fi
+elif ip link show gpd0 >/dev/null 2>&1 && [[ "$(cat /sys/class/net/gpd0/operstate 2>/dev/null)" == "up" ]]; then
   status="connected"
 fi
 
