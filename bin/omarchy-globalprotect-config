@@ -17,11 +17,11 @@ case "$action" in
     browser="brave"
 
     if [[ -f "$CONFIG_FILE" ]]; then
-      p=$(grep -i "^portal=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- | tr -d ' ' || true)
+      p=$(grep -E "^[[:space:]]*portal[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' ' || true)
       [[ -n "$p" ]] && portal="$p"
-      u=$(grep -i "^username=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- | tr -d ' ' || true)
+      u=$(grep -E "^[[:space:]]*username[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' ' || true)
       [[ -n "$u" ]] && username="$u"
-      b=$(grep -i "^browser=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- | tr -d ' ' || true)
+      b=$(grep -E "^[[:space:]]*browser[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' ' || true)
       [[ -n "$b" ]] && browser="$b"
     fi
 

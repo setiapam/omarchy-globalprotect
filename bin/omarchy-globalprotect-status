@@ -18,19 +18,17 @@ if command -v globalprotect >/dev/null 2>&1; then
 fi
 
 if [[ -f "$CONFIG_FILE" ]]; then
-  cfg_p=$(grep -i "^portal=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- | tr -d ' ' || true)
+  cfg_p=$(grep -E "^[[:space:]]*portal[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' ' || true)
   [[ -n "$cfg_p" ]] && portal="$cfg_p"
 fi
 
 # Check status via globalprotect CLI directly
 gp_status=$(globalprotect show --status 2>/dev/null | grep -i "GlobalProtect status:" | tr '[:upper:]' '[:lower:]' || echo "")
 
-if [[ "$gp_status" =~ (connected|connecting) ]] && ! [[ "$gp_status" =~ (disconnected|disabled) ]]; then
-  if [[ "$gp_status" =~ "connected" ]]; then
-    status="connected"
-  else
-    status="connecting"
-  fi
+if [[ "$gp_status" =~ "connected" ]] && ! [[ "$gp_status" =~ (disconnected|disabled) ]]; then
+  status="connected"
+elif [[ "$gp_status" =~ (connecting|discovering|retrieving) ]]; then
+  status="connecting"
 elif ip link show gpd0 >/dev/null 2>&1 && [[ "$(cat /sys/class/net/gpd0/operstate 2>/dev/null)" == "up" ]]; then
   status="connected"
 fi

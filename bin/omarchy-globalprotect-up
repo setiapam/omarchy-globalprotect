@@ -13,11 +13,12 @@ USERNAME="setia.pambudi"
 BROWSER="default"
 
 if [[ -f "$CONFIG_FILE" ]]; then
-  p=$(grep -i "^portal=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- | tr -d ' ' || true)
+  # Strip inline comments and whitespace
+  p=$(grep -E "^[[:space:]]*portal[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' ' || true)
   [[ -n "$p" ]] && PORTAL="$p"
-  u=$(grep -i "^username=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- | tr -d ' ' || true)
+  u=$(grep -E "^[[:space:]]*username[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' ' || true)
   [[ -n "$u" ]] && USERNAME="$u"
-  b=$(grep -i "^browser=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- | tr -d ' ' || true)
+  b=$(grep -E "^[[:space:]]*browser[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' ' || true)
   [[ -n "$b" ]] && BROWSER="$b"
 fi
 
@@ -36,4 +37,4 @@ if [[ -n "$BROWSER" && "$BROWSER" != "default" ]]; then
 fi
 
 echo "Connecting to GlobalProtect ($PORTAL) for user $USERNAME..."
-globalprotect connect -p "$PORTAL" -u "$USERNAME" &
+exec globalprotect connect -p "$PORTAL" -u "$USERNAME"
