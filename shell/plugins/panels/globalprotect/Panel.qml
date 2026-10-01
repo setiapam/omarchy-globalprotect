@@ -118,93 +118,173 @@ Panel {
         }
       }
       onCloseRequested: root.close()
-    }
 
-    ColumnLayout {
-      id: column
-      anchors.fill: parent
-      spacing: Style.space(8)
+      Flickable {
+        id: panelFlick
+        anchors.fill: parent
+        contentWidth: width
+        contentHeight: column.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
 
-      // Package Missing Alert Banner
-      Rectangle {
-        visible: !vpn.pkgInstalled
-        Layout.fillWidth: true
-        implicitHeight: missingBox.implicitHeight + Style.space(16)
-        color: Qt.rgba(root.urgent.r, root.urgent.g, root.urgent.b, 0.15)
-        border.color: root.urgent
-        border.width: 1
-        radius: Style.space(4)
+        Column {
+          id: column
+          width: panelFlick.width
+          spacing: Style.space(12)
 
-        ColumnLayout {
-          id: missingBox
-          anchors.fill: parent
-          anchors.margins: Style.space(8)
-          spacing: Style.space(6)
+          // Package Missing Alert Banner
+          Rectangle {
+            visible: !vpn.pkgInstalled
+            width: parent.width
+            implicitHeight: missingBox.implicitHeight + Style.space(16)
+            color: Qt.rgba(root.urgent.r, root.urgent.g, root.urgent.b, 0.15)
+            border.color: root.urgent
+            border.width: 1
+            radius: Style.space(4)
 
-          Text {
-            text: "globalprotect-openconnect is not installed"
-            font.family: root.fontFamily
-            font.pixelSize: Style.fontSize(11)
-            font.weight: Font.Bold
-            color: root.urgent
-            wrapMode: Text.WordWrap
-            Layout.fillWidth: true
+            ColumnLayout {
+              id: missingBox
+              anchors.fill: parent
+              anchors.margins: Style.space(8)
+              spacing: Style.space(6)
+
+              Text {
+                text: "globalprotect-openconnect is not installed"
+                font.family: root.fontFamily
+                font.pixelSize: Style.fontSize(11)
+                font.weight: Font.Bold
+                color: root.urgent
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+              }
+
+              Button {
+                text: "Install Package"
+                onClicked: vpn.installPackage()
+              }
+            }
           }
 
-          Button {
-            text: "Install Package"
-            Layout.fillWidth: true
-            onClicked: vpn.installPackage()
+          Item {
+            id: header
+            width: parent.width
+            implicitHeight: hero.implicitHeight
+            readonly property bool ringVisible: root.cursorActive && root.focusSection === "header"
+            function focusHero() { root.cursorActive = true; root.focusSection = "header" }
+
+            PanelHero {
+              id: hero
+              width: parent.width
+              title: vpn.portal !== "" ? vpn.portal : "GlobalProtect VPN"
+              meta: vpn.uiActive ? "VPN Connected" : "VPN Disconnected"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              iconOpacity: vpn.uiActive ? 1.0 : 0.5
+              
+              iconComponent: Component {
+                Item {
+                  implicitWidth: Style.font.display
+                  implicitHeight: Style.font.display
+                  
+                  Text {
+                    text: "\uf023"
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.display
+                    color: vpn.uiActive ? root.foreground : root.dim
+                    anchors.centerIn: parent
+                  }
+                  
+                  Rectangle {
+                    visible: !vpn.uiActive
+                    anchors.centerIn: parent
+                    width: parent.width * 1.22
+                    height: Math.max(2, parent.height * 0.14)
+                    radius: height / 2
+                    color: root.dim
+                    rotation: -45
+                  }
+                }
+              }
+
+              trailingControl: Component {
+                ToggleSwitch {
+                  checked: vpn.uiActive
+                  busy: vpn.busy || vpn.status === "connecting"
+                  hasCursor: header.ringVisible
+                  foreground: hero.foreground
+                  onHovered: function(on) { if (on) header.focusHero() }
+                  onToggled: vpn.toggle()
+                }
+              }
+            }
+          }
+
+          PanelSeparator {
+            foreground: root.foreground
+          }
+
+          Column {
+            width: parent.width
+            spacing: Style.space(6)
+            
+            CursorSurface {
+              width: parent.width
+              implicitHeight: configRow.implicitHeight + Style.spacing.rowPaddingX
+              hasCursor: root.cursorActive && root.focusSection === "config"
+              foreground: root.foreground
+              
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                onEntered: { root.cursorActive = true; root.focusSection = "config" }
+                onClicked: { root.isConfigOpen = !root.isConfigOpen }
+              }
+              
+              RowLayout {
+                id: configRow
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Style.space(10)
+                anchors.rightMargin: Style.space(10)
+                spacing: Style.space(10)
+
+                Text {
+                  text: root.isConfigOpen ? "\uf077" : "\uf013"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.icon
+                  Layout.alignment: Qt.AlignVCenter
+                }
+                
+                Text {
+                  Layout.fillWidth: true
+                  text: root.isConfigOpen ? "Hide Settings" : "Settings..."
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  elide: Text.ElideRight
+                }
+              }
+            }
+            
+            Loader {
+              active: root.isConfigOpen
+              visible: active
+              height: active ? implicitHeight : 0
+              width: parent.width
+              sourceComponent: Component {
+                ConfigPanel {
+                  width: parent.width
+                  pluginDir: Quickshell.env("HOME") + "/.config/omarchy/plugins/setiapam.globalprotect"
+                  onCloseRequested: root.isConfigOpen = false
+                  onConfigSaved: { root.isConfigOpen = false; vpn.refresh() }
+                }
+              }
+            }
           }
         }
-      }
-
-      // Connection Status Header
-      RowLayout {
-        Layout.fillWidth: true
-        spacing: Style.space(8)
-
-        ColumnLayout {
-          Layout.fillWidth: true
-          spacing: Style.space(2)
-
-          Text {
-            text: "GlobalProtect VPN"
-            font.family: root.fontFamily
-            font.pixelSize: Style.fontSize(14)
-            font.weight: Font.DemiBold
-            color: root.foreground
-          }
-
-          Text {
-            text: vpn.uiActive ? ("Connected to " + (vpn.portal || "VPN")) : "Disconnected"
-            font.family: root.fontFamily
-            font.pixelSize: Style.fontSize(11)
-            color: vpn.uiActive ? root.foreground : root.dim
-          }
-        }
-
-        Button {
-          text: vpn.uiActive ? "Disconnect" : "Connect"
-          enabled: vpn.pkgInstalled && !vpn.busy
-          onClicked: vpn.toggle()
-        }
-      }
-
-      // Settings Toggle Button
-      Button {
-        Layout.fillWidth: true
-        text: root.isConfigOpen ? "Hide Settings" : "Configure VPN"
-        onClicked: root.isConfigOpen = !root.isConfigOpen
-      }
-
-      // Inline Settings Panel
-      ConfigPanel {
-        visible: root.isConfigOpen
-        Layout.fillWidth: true
-        pluginDir: "$HOME/.config/omarchy/plugins/setiapam.globalprotect"
-        onCloseRequested: root.isConfigOpen = false
-        onConfigSaved: vpn.refresh()
       }
     }
   }

@@ -103,7 +103,6 @@ ColumnLayout {
 
         Button {
             text: "✕"
-            flat: true
             onClicked: configPanel.closeRequested()
         }
     }
