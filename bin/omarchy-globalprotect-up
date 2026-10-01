@@ -13,7 +13,6 @@ USERNAME="setia.pambudi"
 BROWSER="default"
 
 if [[ -f "$CONFIG_FILE" ]]; then
-  # Strip inline comments and whitespace
   p=$(grep -E "^[[:space:]]*portal[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' ' || true)
   [[ -n "$p" ]] && PORTAL="$p"
   u=$(grep -E "^[[:space:]]*username[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' ' || true)
@@ -37,4 +36,16 @@ if [[ -n "$BROWSER" && "$BROWSER" != "default" ]]; then
 fi
 
 echo "Connecting to GlobalProtect ($PORTAL) for user $USERNAME..."
-exec globalprotect connect -p "$PORTAL" -u "$USERNAME"
+globalprotect connect -p "$PORTAL" -u "$USERNAME" &
+
+# Background monitor to send desktop notification once connected
+(
+  for i in {1..60}; do
+    sleep 1
+    st=$(globalprotect show --status 2>/dev/null | grep -i "GlobalProtect status:" | tr '[:upper:]' '[:lower:]' || echo "")
+    if [[ "$st" =~ "connected" ]] && ! [[ "$st" =~ (disconnected|disabled) ]]; then
+      omarchy-notification-send "GlobalProtect" "Connected to $PORTAL" 2>/dev/null || notify-send "GlobalProtect" "Connected to $PORTAL" 2>/dev/null || true
+      break
+    fi
+  done
+) >/dev/null 2>&1 &
