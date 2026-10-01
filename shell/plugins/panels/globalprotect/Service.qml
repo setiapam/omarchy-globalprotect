@@ -73,7 +73,6 @@ Item {
     id: upProc
     command: ["bash", "-c", "~/.config/omarchy/plugins/setiapam.globalprotect/bin/omarchy-globalprotect-up"]
     onExited: function() {
-      _desired = -1
       root.refresh()
     }
   }

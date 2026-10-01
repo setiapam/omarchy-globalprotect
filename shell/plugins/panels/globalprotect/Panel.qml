@@ -152,7 +152,7 @@ Panel {
               Text {
                 text: "globalprotect-openconnect is not installed"
                 font.family: root.fontFamily
-                font.pixelSize: Style.fontSize(11)
+                font.pixelSize: Style.font.sub
                 font.weight: Font.Bold
                 color: root.urgent
                 wrapMode: Text.WordWrap

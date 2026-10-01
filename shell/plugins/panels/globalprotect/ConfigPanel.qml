@@ -94,7 +94,7 @@ ColumnLayout {
         Text {
             text: "Settings"
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.fontSize(14)
+            font.pixelSize: Style.font.title
             font.weight: Font.DemiBold
             color: configPanel.foreground
         }
@@ -115,7 +115,7 @@ ColumnLayout {
         Text {
             text: "Portal Server"
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.fontSize(10)
+            font.pixelSize: Style.font.sub
             color: configPanel.dim
         }
 
@@ -125,7 +125,7 @@ ColumnLayout {
             text: configPanel.portal
             placeholderText: "vpn.bps.go.id"
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.fontSize(12)
+            font.pixelSize: Style.font.body
         }
     }
 
@@ -137,7 +137,7 @@ ColumnLayout {
         Text {
             text: "Gateway (Optional)"
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.fontSize(10)
+            font.pixelSize: Style.font.sub
             color: configPanel.dim
         }
 
@@ -147,7 +147,7 @@ ColumnLayout {
             text: configPanel.gateway
             placeholderText: "Leave blank to match portal"
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.fontSize(12)
+            font.pixelSize: Style.font.body
         }
     }
 
@@ -159,7 +159,7 @@ ColumnLayout {
         Text {
             text: "Use SAML / SSO Login"
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.fontSize(12)
+            font.pixelSize: Style.font.body
             color: configPanel.foreground
             Layout.fillWidth: true
         }
@@ -178,7 +178,7 @@ ColumnLayout {
         Text {
             text: "Username"
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.fontSize(10)
+            font.pixelSize: Style.font.sub
             color: configPanel.dim
         }
 
@@ -188,7 +188,7 @@ ColumnLayout {
             text: configPanel.username
             placeholderText: "setia.pambudi"
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.fontSize(12)
+            font.pixelSize: Style.font.body
         }
     }
 
@@ -201,7 +201,7 @@ ColumnLayout {
         Text {
             text: "Password"
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.fontSize(10)
+            font.pixelSize: Style.font.sub
             color: configPanel.dim
         }
 
@@ -212,7 +212,7 @@ ColumnLayout {
             echoMode: TextInput.Password
             placeholderText: "••••••••"
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.fontSize(12)
+            font.pixelSize: Style.font.body
         }
     }
 
@@ -225,7 +225,7 @@ ColumnLayout {
         Text {
             text: "SSO Browser"
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.fontSize(10)
+            font.pixelSize: Style.font.sub
             color: configPanel.dim
         }
 
@@ -235,7 +235,7 @@ ColumnLayout {
             text: configPanel.browser
             placeholderText: "default (or remote, brave, firefox)"
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.fontSize(12)
+            font.pixelSize: Style.font.body
         }
     }
 
@@ -245,7 +245,7 @@ ColumnLayout {
         Text {
             text: "Ignore TLS Errors"
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.fontSize(11)
+            font.pixelSize: Style.font.sub
             color: configPanel.dim
             Layout.fillWidth: true
         }
@@ -257,7 +257,7 @@ ColumnLayout {
         Text {
             text: "OpenSSL Fix (Legacy)"
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.fontSize(11)
+            font.pixelSize: Style.font.sub
             color: configPanel.dim
             Layout.fillWidth: true
         }
@@ -269,7 +269,7 @@ ColumnLayout {
         Text {
             text: "Disable DTLS"
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.fontSize(11)
+            font.pixelSize: Style.font.sub
             color: configPanel.dim
             Layout.fillWidth: true
         }
