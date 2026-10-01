@@ -20,7 +20,7 @@ Panel {
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   
-  readonly property color barIconColor: vpn.active ? foreground : Qt.darker(foreground, 1.55)
+  readonly property color barIconColor: vpn.uiActive ? foreground : Qt.darker(foreground, 1.55)
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -68,7 +68,7 @@ Panel {
         }
         
         Rectangle {
-          visible: !vpn.active
+          visible: !vpn.uiActive
           anchors.centerIn: parent
           width: parent.width * 1.22
           height: Math.max(2, parent.height * 0.14)
@@ -177,10 +177,10 @@ Panel {
               id: hero
               width: parent.width
               title: vpn.portal !== "" ? vpn.portal : "GlobalProtect VPN"
-              meta: vpn.active ? "VPN Connected" : (vpn.status === "connecting" ? "Connecting…" : (vpn.status === "disconnecting" ? "Disconnecting…" : "VPN Disconnected"))
+              meta: vpn.uiActive ? "VPN Connected" : (vpn.status === "connecting" ? "Connecting…" : (vpn.status === "disconnecting" ? "Disconnecting…" : "VPN Disconnected"))
               foreground: root.foreground
               fontFamily: root.fontFamily
-              iconOpacity: vpn.active ? 1.0 : 0.5
+              iconOpacity: vpn.uiActive ? 1.0 : 0.5
               
               iconComponent: Component {
                 Item {
@@ -191,12 +191,12 @@ Panel {
                     text: "\uf023"
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.display
-                    color: vpn.active ? root.foreground : root.dim
+                    color: vpn.uiActive ? root.foreground : root.dim
                     anchors.centerIn: parent
                   }
                   
                   Rectangle {
-                    visible: !vpn.active
+                    visible: !vpn.uiActive
                     anchors.centerIn: parent
                     width: parent.width * 1.22
                     height: Math.max(2, parent.height * 0.14)
@@ -209,8 +209,8 @@ Panel {
 
               trailingControl: Component {
                 ToggleSwitch {
-                  checked: vpn.active
-                  busy: vpn.busy || vpn.status === "connecting" || vpn.status === "disconnecting"
+                  checked: vpn.uiActive
+                  busy: vpn.busy || vpn.status === "connecting"
                   hasCursor: header.ringVisible
                   foreground: hero.foreground
                   onHovered: function(on) { if (on) header.focusHero() }

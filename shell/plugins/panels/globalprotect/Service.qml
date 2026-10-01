@@ -11,28 +11,32 @@ Item {
   property bool pkgInstalled: true
   property string configError: ""
 
-  readonly property bool active: status === "connected"
+  readonly property bool active: status === "connected" || status === "connecting"
   readonly property bool running: status === "connected"
   property bool busy: statusProc.running || upProc.running || downProc.running
+
+  // Optimistic UI state matching openfortivpn
+  property int _desired: -1
+  readonly property bool uiActive: _desired === -1 ? active : (_desired === 1)
 
   function refresh() {
     if (!statusProc.running) statusProc.running = true
   }
 
   function toggle() {
-    if (active) down()
+    if (uiActive) down()
     else up()
   }
 
   function up() {
     if (upProc.running) return
-    status = "connecting"
+    _desired = 1
     upProc.running = true
   }
 
   function down() {
     if (downProc.running) return
-    status = "disconnecting"
+    _desired = 0
     downProc.running = true
   }
 
@@ -54,21 +58,33 @@ Item {
           if (json.uptimeSeconds !== null && json.uptimeSeconds !== undefined) {
              root.uptimeSeconds = json.uptimeSeconds
           }
+          if (_desired !== -1 && root.active === (_desired === 1)) {
+             _desired = -1
+          }
         } catch (e) {}
       }
+    }
+    onExited: function() {
+      if (root.status === "disconnected" && _desired === 0) _desired = -1
     }
   }
 
   Process {
     id: upProc
     command: ["bash", "-c", "~/.config/omarchy/plugins/setiapam.globalprotect/bin/omarchy-globalprotect-up"]
-    onExited: function() { root.refresh() }
+    onExited: function() {
+      _desired = -1
+      root.refresh()
+    }
   }
 
   Process {
     id: downProc
     command: ["bash", "-c", "~/.config/omarchy/plugins/setiapam.globalprotect/bin/omarchy-globalprotect-down"]
-    onExited: function() { root.refresh() }
+    onExited: function() {
+      _desired = -1
+      root.refresh()
+    }
   }
 
   Process {
@@ -78,7 +94,7 @@ Item {
   }
 
   Timer {
-    interval: 3000
+    interval: 5000
     running: true
     repeat: true
     triggeredOnStart: true
