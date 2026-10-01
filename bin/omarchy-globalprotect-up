@@ -1,0 +1,64 @@
+#!/bin/bash
+# omarchy:summary=Connect to GlobalProtect VPN gateway
+# omarchy:args=[config_name]
+# omarchy:requires-sudo=true
+
+set -euo pipefail
+
+CONFIG_NAME="${1:-config}"
+CONFIG_DIR="$HOME/.config/globalprotect"
+CONFIG_FILE="$CONFIG_DIR/$CONFIG_NAME"
+RUN_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omarchy-globalprotect"
+mkdir -p "$RUN_DIR"
+chmod 700 "$RUN_DIR"
+PID_FILE="$RUN_DIR/${CONFIG_NAME}.pid"
+LOCK_FILE="$RUN_DIR/${CONFIG_NAME}.lock"
+
+readonly HELPER="/usr/local/lib/omarchy/globalprotect-helper"
+readonly CALLING_USER="$(id -un)"
+
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "Another instance of globalprotect-up is already running."
+  exit 0
+fi
+
+if ! command -v gpclient >/dev/null 2>&1; then
+  echo "Error: gpclient is not installed."
+  omarchy-notification-send "GlobalProtect" "Error: globalprotect-openconnect is not installed." 2>/dev/null || true
+  exit 1
+fi
+
+if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
+  echo "VPN is already connected (PID: $(cat "$PID_FILE"))"
+  exit 0
+fi
+
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  echo "Error: Config file not found: $CONFIG_FILE"
+  exit 1
+fi
+
+exec_vpn() {
+  if sudo -n -l "$HELPER" >/dev/null 2>&1; then
+    sudo "$HELPER" connect "$CALLING_USER" "$CONFIG_NAME" "$@"
+  elif command -v pkexec >/dev/null 2>&1; then
+    pkexec "$HELPER" connect "$CALLING_USER" "$CONFIG_NAME" "$@"
+  else
+    sudo "$HELPER" connect "$CALLING_USER" "$CONFIG_NAME" "$@"
+  fi
+}
+
+echo "==> Connecting to GlobalProtect VPN ($CONFIG_NAME)..."
+exec_vpn &
+VPN_PID=$!
+echo "$VPN_PID" > "$PID_FILE"
+
+sleep 3
+if kill -0 "$VPN_PID" 2>/dev/null; then
+  echo "✓ GlobalProtect connection launched (PID: $VPN_PID)"
+  omarchy-notification-send "GlobalProtect" "Connected successfully" 2>/dev/null || true
+else
+  rm -f "$PID_FILE"
+  echo "✗ GlobalProtect connection ended or failed."
+fi

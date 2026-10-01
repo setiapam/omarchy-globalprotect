@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "setiapam.globalprotect",
+  "name": "GlobalProtect VPN",
+  "version": "1.0.0",
+  "description": "GlobalProtect VPN client integration with SAML/SSO support via gpclient / openconnect",
+  "kinds": ["bar-widget"],
+  "author": "setiapam",
+  "entryPoints": {
+    "barWidget": "shell/plugins/panels/globalprotect/Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "GlobalProtect VPN",
+    "description": "GlobalProtect VPN client with SAML/SSO support",
+    "category": "System",
+    "allowMultiple": false
+  },
+  "license": "MIT"
+}

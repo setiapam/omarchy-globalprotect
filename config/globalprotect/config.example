@@ -1,0 +1,31 @@
+# GlobalProtect VPN Configuration
+# Managed by omarchy-globalprotect
+
+# VPN Portal Server
+portal = vpn.bps.go.id
+
+# Optional Gateway (if different from portal, or leave empty)
+gateway = 
+
+# Username (leave empty if using SAML SSO)
+username = setia.pambudi
+
+# Password (optional, leave empty if using SAML SSO)
+password = 
+
+# SAML/SSO Authentication (true / false)
+# When true, gpclient opens browser for SSO authentication
+saml = true
+
+# Browser to use: default, remote, firefox, chrome, chromium, or path
+browser = default
+
+# Extra flags
+# Ignore TLS certificate errors
+ignore-tls-errors = false
+
+# Extended OpenSSL compatibility mode
+fix-openssl = false
+
+# Disable DTLS/ESP tunnel
+no-dtls = false

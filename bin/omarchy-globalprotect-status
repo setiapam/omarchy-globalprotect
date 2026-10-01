@@ -1,0 +1,48 @@
+#!/bin/bash
+# omarchy:summary=Check GlobalProtect VPN status
+# omarchy:args=[config_name]
+
+set -euo pipefail
+
+CONFIG_NAME="${1:-config}"
+RUN_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omarchy-globalprotect"
+PID_FILE="$RUN_DIR/${CONFIG_NAME}.pid"
+CONFIG_FILE="$HOME/.config/globalprotect/$CONFIG_NAME"
+
+status="disconnected"
+pid=""
+portal=""
+uptime_secs="null"
+pkg_installed="false"
+
+if command -v gpclient >/dev/null 2>&1; then
+  pkg_installed="true"
+fi
+
+if [[ -f "$CONFIG_FILE" ]]; then
+  portal=$(grep -i "^portal[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null | head -1 | sed 's/^portal[[:space:]]*=[[:space:]]*//' | tr -d '[:space:]' || echo "")
+fi
+
+# Check gpclient process
+if pgrep -x gpclient >/dev/null 2>&1; then
+  pid=$(pgrep -x gpclient | head -1 || echo "")
+  status="connected"
+  if [[ -n "$pid" && -d "/proc/$pid" ]]; then
+    start_time=$(stat -c %Y "/proc/$pid" 2>/dev/null || echo "")
+    if [[ -n "$start_time" ]]; then
+      now=$(date +%s)
+      uptime_secs=$(( now - start_time ))
+    fi
+  fi
+elif [[ -f "$PID_FILE" ]]; then
+  pid=$(cat "$PID_FILE" 2>/dev/null || echo "")
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    status="connected"
+  else
+    rm -f "$PID_FILE"
+    pid=""
+  fi
+fi
+
+# Print single-line JSON
+echo "{\"status\":\"$status\",\"pid\":\"$pid\",\"portal\":\"$portal\",\"config\":\"$CONFIG_NAME\",\"pkgInstalled\":$pkg_installed,\"uptimeSeconds\":$uptime_secs}"

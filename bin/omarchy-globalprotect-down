@@ -1,0 +1,29 @@
+#!/bin/bash
+# omarchy:summary=Disconnect from GlobalProtect VPN
+# omarchy:args=[config_name]
+# omarchy:requires-sudo=true
+
+set -euo pipefail
+
+CONFIG_NAME="${1:-config}"
+RUN_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omarchy-globalprotect"
+PID_FILE="$RUN_DIR/${CONFIG_NAME}.pid"
+
+readonly HELPER="/usr/local/lib/omarchy/globalprotect-helper"
+
+exec_disconnect() {
+  if sudo -n -l "$HELPER" >/dev/null 2>&1; then
+    sudo "$HELPER" disconnect
+  elif command -v pkexec >/dev/null 2>&1; then
+    pkexec "$HELPER" disconnect
+  else
+    sudo "$HELPER" disconnect
+  fi
+}
+
+echo "==> Disconnecting GlobalProtect VPN..."
+exec_disconnect
+rm -f "$PID_FILE"
+
+echo "✓ VPN disconnected"
+omarchy-notification-send "GlobalProtect" "Disconnected" 2>/dev/null || true
