@@ -74,7 +74,7 @@ ColumnLayout {
             Layout.fillWidth: true
             Layout.minimumWidth: 0
             wrapMode: Text.WordWrap
-            text: "Konfigurasi GlobalProtect"
+            text: "GlobalProtect Settings"
             color: configPanel.foreground
             font.family: configPanel.fontFamily
             font.pixelSize: Style.font.subtitle
@@ -91,7 +91,7 @@ ColumnLayout {
             Layout.fillWidth: true
             Layout.minimumWidth: 0
             wrapMode: Text.WordWrap
-            text: "Portal VPN"
+            text: "VPN Portal"
             color: configPanel.dim
             font.family: configPanel.fontFamily
             font.pixelSize: Style.font.bodySmall
@@ -117,7 +117,7 @@ ColumnLayout {
             Layout.fillWidth: true
             Layout.minimumWidth: 0
             wrapMode: Text.WordWrap
-            text: "Username (SSO BPS)"
+            text: "Username (BPS SSO)"
             color: configPanel.dim
             font.family: configPanel.fontFamily
             font.pixelSize: Style.font.bodySmall
@@ -143,7 +143,7 @@ ColumnLayout {
             Layout.fillWidth: true
             Layout.minimumWidth: 0
             wrapMode: Text.WordWrap
-            text: "Browser SAML (brave, firefox, chrome, default)"
+            text: "SAML Browser (brave, firefox, chrome, default)"
             color: configPanel.dim
             font.family: configPanel.fontFamily
             font.pixelSize: Style.font.bodySmall
@@ -166,7 +166,7 @@ ColumnLayout {
         spacing: Style.space(8)
 
         Ui.Button {
-            text: "Batal"
+            text: "Cancel"
             Layout.fillWidth: true
             fontFamily: configPanel.fontFamily
             fontSize: Style.font.body
@@ -177,7 +177,7 @@ ColumnLayout {
         }
 
         Ui.Button {
-            text: "Simpan"
+            text: "Save"
             Layout.fillWidth: true
             fontFamily: configPanel.fontFamily
             fontSize: Style.font.body
