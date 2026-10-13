@@ -21,12 +21,25 @@ if [[ -f "$CONFIG_FILE" ]]; then
   [[ -n "$b" ]] && BROWSER="$b"
 fi
 
+# Serialize connect attempts and start the required system daemon first.
+RUN_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omarchy-globalprotect"
+mkdir -p "$RUN_DIR"
+chmod 700 "$RUN_DIR"
+exec 9>"$RUN_DIR/connect.lock"
+flock -n 9 || exit 0
+
+if ! systemctl is-active --quiet gpd.service; then
+  echo "Starting GlobalProtect daemon (administrator authentication may be required)..."
+  pkexec /usr/bin/systemctl start gpd.service
+fi
+systemctl is-active --quiet gpd.service || { echo "GlobalProtect daemon failed to start." >&2; exit 1; }
+
 # Clean up any stale cli connect instances
 pkill -x globalprotect 2>/dev/null || true
 
 # Ensure PanGPA is running in user session
 if ! pgrep -u "$USER" PanGPA >/dev/null 2>&1; then
-  /opt/paloaltonetworks/globalprotect/PanGPA start &
+  /opt/paloaltonetworks/globalprotect/PanGPA start 9>&- &
   sleep 1
 fi
 
@@ -36,14 +49,14 @@ if [[ -n "$BROWSER" && "$BROWSER" != "default" ]]; then
 fi
 
 echo "Connecting to GlobalProtect ($PORTAL) for user $USERNAME..."
-globalprotect connect -p "$PORTAL" -u "$USERNAME" &
+globalprotect connect -p "$PORTAL" -u "$USERNAME" 9>&- &
 
 # Background monitor to send desktop notification once connected
 (
   for i in {1..60}; do
     sleep 1
-    st=$(globalprotect show --status 2>/dev/null | grep -i "GlobalProtect status:" | tr '[:upper:]' '[:lower:]' || echo "")
-    if [[ "$st" =~ "connected" ]] && ! [[ "$st" =~ (disconnected|disabled) ]]; then
+    st=$("$(dirname "${BASH_SOURCE[0]}")/omarchy-globalprotect-status" 2>/dev/null || true)
+    if [[ "$st" == *'"status":"connected"'* ]]; then
       omarchy-notification-send "GlobalProtect" "Connected to $PORTAL" 2>/dev/null || notify-send "GlobalProtect" "Connected to $PORTAL" 2>/dev/null || true
       break
     fi

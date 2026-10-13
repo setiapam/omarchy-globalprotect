@@ -22,15 +22,27 @@ if [[ -f "$CONFIG_FILE" ]]; then
   [[ -n "$cfg_p" ]] && portal="$cfg_p"
 fi
 
-# Check status via globalprotect CLI directly
-gp_status=$(globalprotect show --status 2>/dev/null | grep -i "GlobalProtect status:" | tr '[:upper:]' '[:lower:]' || echo "")
+# TUN devices may report operstate UNKNOWN while fully connected.
+# An active gpd0 with an assigned IPv4 address is the fast polling path.
+tunnel_active=false
+if [[ -r /sys/class/net/gpd0/flags ]]; then
+  tunnel_flags=$(cat /sys/class/net/gpd0/flags)
+  if (( tunnel_flags & 1 )) && ip -o -4 address show dev gpd0 | grep -q ' inet ' && pgrep -x PanGPS >/dev/null; then
+    tunnel_active=true
+  fi
+fi
 
-if [[ "$gp_status" =~ "connected" ]] && ! [[ "$gp_status" =~ (disconnected|disabled) ]]; then
+if [[ "$tunnel_active" == "true" ]]; then
   status="connected"
-elif [[ "$gp_status" =~ (connecting|discovering|retrieving) ]]; then
-  status="connecting"
-elif ip link show gpd0 >/dev/null 2>&1 && [[ "$(cat /sys/class/net/gpd0/operstate 2>/dev/null)" == "up" ]]; then
-  status="connected"
+else
+  # Preserve any useful output even if the CLI exits on timeout.
+  cli_output=$(timeout 5 globalprotect show --status 2>/dev/null || true)
+  gp_status=$(printf '%s' "$cli_output" | tr '\r' '\n' | grep -i "GlobalProtect status:" | tr '[:upper:]' '[:lower:]' || true)
+  if [[ "$gp_status" =~ "connected" ]] && ! [[ "$gp_status" =~ (disconnected|disabled) ]]; then
+    status="connected"
+  elif [[ "$gp_status" =~ (connecting|discovering|retrieving) ]]; then
+    status="connecting"
+  fi
 fi
 
 if [[ "$status" == "connected" ]]; then
