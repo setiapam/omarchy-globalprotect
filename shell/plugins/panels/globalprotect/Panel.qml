@@ -131,6 +131,9 @@ Panel {
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
+        ScrollBar.vertical: ScrollBar {
+          policy: ScrollBar.AsNeeded
+        }
 
         Column {
           id: column
@@ -243,11 +246,13 @@ Panel {
             Loader {
               active: root.isConfigOpen
               visible: active
-              height: active ? implicitHeight : 0
+              height: active && item ? item.implicitHeight : 0
               width: parent.width
               sourceComponent: Component {
                 ConfigPanel {
                   width: parent.width
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
                   pluginDir: Quickshell.env("HOME") + "/.config/omarchy/plugins/setiapam.globalprotect"
                   onCloseRequested: root.isConfigOpen = false
                   onConfigSaved: { root.isConfigOpen = false; vpn.refresh() }

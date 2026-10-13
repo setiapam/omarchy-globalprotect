@@ -3,7 +3,8 @@ import QtQuick.Layouts
 import QtQuick.Controls
 import Quickshell.Io
 import qs.Commons
-import qs.Ui
+import qs.Commons as Commons
+import qs.Ui as Ui
 
 ColumnLayout {
     id: configPanel
@@ -13,7 +14,7 @@ ColumnLayout {
 
     property string pluginDir: ""
     
-    property color foreground: Color.foreground
+    property color foreground: Commons.Color.foreground
     property color dim: Qt.darker(foreground, 1.55)
     property string fontFamily: Style.font.family
 
@@ -69,12 +70,15 @@ ColumnLayout {
     RowLayout {
         Layout.fillWidth: true
         Text {
+            textFormat: Text.PlainText
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            wrapMode: Text.WordWrap
             text: "Konfigurasi GlobalProtect"
             color: configPanel.foreground
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.fontSize("sm")
+            font.pixelSize: Style.font.subtitle
             font.weight: Font.Bold
-            Layout.fillWidth: true
         }
     }
 
@@ -83,23 +87,24 @@ ColumnLayout {
         Layout.fillWidth: true
         spacing: Style.space(4)
         Text {
+            textFormat: Text.PlainText
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            wrapMode: Text.WordWrap
             text: "Portal VPN"
             color: configPanel.dim
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.fontSize("xs")
+            font.pixelSize: Style.font.bodySmall
         }
-        TextField {
+        Ui.TextField {
             id: portalInput
             text: configPanel.portal
             Layout.fillWidth: true
             color: configPanel.foreground
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.fontSize("xs")
-            background: Rectangle {
-                color: Qt.rgba(1, 1, 1, 0.05)
-                border.color: configPanel.dim
-                radius: 4
-            }
+            font.pixelSize: Style.font.body
+            foreground: configPanel.foreground
+            Layout.minimumWidth: 0
         }
     }
 
@@ -108,23 +113,24 @@ ColumnLayout {
         Layout.fillWidth: true
         spacing: Style.space(4)
         Text {
+            textFormat: Text.PlainText
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            wrapMode: Text.WordWrap
             text: "Username (SSO BPS)"
             color: configPanel.dim
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.fontSize("xs")
+            font.pixelSize: Style.font.bodySmall
         }
-        TextField {
+        Ui.TextField {
             id: usernameInput
             text: configPanel.username
             Layout.fillWidth: true
             color: configPanel.foreground
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.fontSize("xs")
-            background: Rectangle {
-                color: Qt.rgba(1, 1, 1, 0.05)
-                border.color: configPanel.dim
-                radius: 4
-            }
+            font.pixelSize: Style.font.body
+            foreground: configPanel.foreground
+            Layout.minimumWidth: 0
         }
     }
 
@@ -133,23 +139,24 @@ ColumnLayout {
         Layout.fillWidth: true
         spacing: Style.space(4)
         Text {
+            textFormat: Text.PlainText
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            wrapMode: Text.WordWrap
             text: "Browser SAML (brave, firefox, chrome, default)"
             color: configPanel.dim
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.fontSize("xs")
+            font.pixelSize: Style.font.bodySmall
         }
-        TextField {
+        Ui.TextField {
             id: browserInput
             text: configPanel.browser
             Layout.fillWidth: true
             color: configPanel.foreground
             font.family: configPanel.fontFamily
-            font.pixelSize: Style.fontSize("xs")
-            background: Rectangle {
-                color: Qt.rgba(1, 1, 1, 0.05)
-                border.color: configPanel.dim
-                radius: 4
-            }
+            font.pixelSize: Style.font.body
+            foreground: configPanel.foreground
+            Layout.minimumWidth: 0
         }
     }
 
@@ -158,15 +165,25 @@ ColumnLayout {
         Layout.fillWidth: true
         spacing: Style.space(8)
 
-        Button {
+        Ui.Button {
             text: "Batal"
             Layout.fillWidth: true
+            fontFamily: configPanel.fontFamily
+            fontSize: Style.font.body
+            foreground: configPanel.foreground
+            focusable: true
+            bordered: true
             onClicked: configPanel.closeRequested()
         }
 
-        Button {
+        Ui.Button {
             text: "Simpan"
             Layout.fillWidth: true
+            fontFamily: configPanel.fontFamily
+            fontSize: Style.font.body
+            foreground: configPanel.foreground
+            focusable: true
+            bordered: true
             onClicked: configPanel.saveConfig()
         }
     }
