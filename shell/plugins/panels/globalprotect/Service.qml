@@ -5,6 +5,13 @@ import Quickshell.Io
 Item {
   id: root
 
+  // Injected by omarchy-shell for a plugin service. The bar widget instances
+  // all share this one object through bar.shell.serviceFor().
+  property var shell: null
+  property var manifest: null
+
+  readonly property string moduleName: "setiapam.globalprotect"
+
   property string status: "disconnected"
   property string portal: ""
   property int uptimeSeconds: 0
@@ -15,8 +22,8 @@ Item {
   readonly property bool active: status === "connected"
   readonly property bool running: status === "connected"
   // upProc deliberately stays alive for the whole VPN session, so it must not
-  // keep the toggle permanently "busy".
-  property bool busy: status === "connecting" || status === "disconnecting" || statusProc.running || downProc.running
+  // keep the toggle permanently "busy". Status polling is also not "busy".
+  property bool busy: status === "connecting" || status === "disconnecting" || downProc.running
 
   // Optimistic state while a connection/disconnection is in progress.
   property int _desired: -1

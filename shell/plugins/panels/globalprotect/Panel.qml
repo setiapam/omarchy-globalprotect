@@ -32,10 +32,32 @@ Panel {
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
-  Service {
-    id: vpn
+  // The service is mounted once by omarchy-shell and shared by every bar
+  // instance. This keeps the state and toggle in sync across all monitors.
+  QtObject {
+    id: emptyVpn
+    property string status: "disconnected"
+    property string portal: ""
+    property int uptimeSeconds: 0
+    property bool pkgInstalled: true
+    property string lastError: ""
+    property bool uiActive: false
+    property bool busy: false
+    function refresh() {}
+    function toggle() {}
+    function up() {}
+    function down() {}
+    function installPackage() {}
   }
-  
+
+  readonly property var vpn: {
+    if (bar && bar.shell && typeof bar.shell.serviceFor === "function") {
+      var service = bar.shell.serviceFor(root.moduleName)
+      if (service) return service
+    }
+    return emptyVpn
+  }
+
   IpcHandler {
     target: root.ipcTarget
     function open(): void { root.open() }

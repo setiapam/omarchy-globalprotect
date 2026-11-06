@@ -4,10 +4,14 @@
   "name": "GlobalProtect VPN",
   "version": "1.1.0",
   "description": "GlobalProtect VPN client with headless SAML + TOTP login via gpclient / openconnect",
-  "kinds": ["bar-widget"],
+  "kinds": [
+    "bar-widget",
+    "service"
+  ],
   "author": "setiapam",
   "entryPoints": {
-    "barWidget": "shell/plugins/panels/globalprotect/Panel.qml"
+    "barWidget": "shell/plugins/panels/globalprotect/Panel.qml",
+    "service": "shell/plugins/panels/globalprotect/Service.qml"
   },
   "barWidget": {
     "displayName": "GlobalProtect VPN",
