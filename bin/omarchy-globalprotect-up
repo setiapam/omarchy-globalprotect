@@ -97,7 +97,12 @@ CONNECT_ARGS=("connect" "$PORTAL")
 
 [[ "$IGNORE_TLS" == "true" ]] && GLOBAL_ARGS+=("--ignore-tls-errors")
 [[ "$FIX_OPENSSL" == "true" ]] && GLOBAL_ARGS+=("--fix-openssl")
-[[ -n "$GATEWAY" ]] && CONNECT_ARGS+=("--gateway" "$GATEWAY")
+if [[ -n "$GATEWAY" ]]; then
+  CONNECT_ARGS+=("--gateway" "$GATEWAY")
+else
+  # With multiple external gateways gpclient otherwise prompts on a TTY.
+  CONNECT_ARGS+=("--auto-gateway")
+fi
 [[ "$NO_DTLS" == "true" ]] && CONNECT_ARGS+=("--no-dtls")
 [[ -n "$USERNAME" ]] && CONNECT_ARGS+=("--user" "$USERNAME")
 
