@@ -117,6 +117,14 @@ ENV_ARGS=("TMPDIR=/tmp")
 [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]] && ENV_ARGS+=("DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS")
 [[ -n "${XAUTHORITY:-}" ]] && ENV_ARGS+=("XAUTHORITY=$XAUTHORITY")
 
+# Detach the privileged client into its own session so it survives the short-
+# lived Omarchy panel process that invokes this script.
+if command -v setsid >/dev/null 2>&1; then
+  SETSID_PREFIX=(setsid -w)
+else
+  SETSID_PREFIX=()
+fi
+
 echo "==> Connecting to GlobalProtect VPN ($CONFIG_NAME)..."
 
 # Headless SAML + TOTP: obtain the prelogin/portal cookies ourselves and feed
@@ -147,7 +155,7 @@ if [[ "$SAML" == "true" && "$HEADLESS" == "true" && -n "$TOTP" ]]; then
   fi
 
   : > "$GP_LOG"
-  printf '%s\n' "$AUTH_JSON" | pkexec env "${ENV_ARGS[@]}" gpclient "${GLOBAL_ARGS[@]}" "${CONNECT_ARGS[@]}" --cookie-on-stdin --browser "$BROWSER_WRAPPER" >"$GP_LOG" 2>&1 &
+  printf '%s\n' "$AUTH_JSON" | "${SETSID_PREFIX[@]}" pkexec env "${ENV_ARGS[@]}" gpclient "${GLOBAL_ARGS[@]}" "${CONNECT_ARGS[@]}" --cookie-on-stdin --browser "$BROWSER_WRAPPER" >"$GP_LOG" 2>&1 &
   VPN_PID=$!
   echo "$VPN_PID" > "$PID_FILE"
 
@@ -155,6 +163,8 @@ if [[ "$SAML" == "true" && "$HEADLESS" == "true" && -n "$TOTP" ]]; then
   if kill -0 "$VPN_PID" 2>/dev/null; then
     echo "✓ GlobalProtect connection launched (PID: $VPN_PID)"
     omarchy-notification-send "GlobalProtect" "Connected via SAML/TOTP" 2>/dev/null || true
+    wait "$VPN_PID" || true
+    rm -f "$PID_FILE"
     exit 0
   fi
 
@@ -173,7 +183,7 @@ if [[ "$SAML" == "true" ]]; then
   fi
   [[ -n "$BROWSER" ]] && CONNECT_ARGS+=("--browser" "$BROWSER")
   : > "$GP_LOG"
-  pkexec env "${ENV_ARGS[@]}" gpclient "${GLOBAL_ARGS[@]}" "${CONNECT_ARGS[@]}" >"$GP_LOG" 2>&1 &
+  "${SETSID_PREFIX[@]}" pkexec env "${ENV_ARGS[@]}" gpclient "${GLOBAL_ARGS[@]}" "${CONNECT_ARGS[@]}" >"$GP_LOG" 2>&1 &
   VPN_PID=$!
   echo "$VPN_PID" > "$PID_FILE"
 
@@ -181,6 +191,8 @@ if [[ "$SAML" == "true" ]]; then
   if kill -0 "$VPN_PID" 2>/dev/null; then
     echo "✓ GlobalProtect connection launched (PID: $VPN_PID)"
     omarchy-notification-send "GlobalProtect" "Connection process started..." 2>/dev/null || true
+    wait "$VPN_PID" || true
+    rm -f "$PID_FILE"
     exit 0
   fi
 
@@ -197,7 +209,7 @@ fi
 
 CONNECT_ARGS+=("--passwd-on-stdin")
 : > "$GP_LOG"
-printf '%s\n' "$PASSWORD" | pkexec env "${ENV_ARGS[@]}" gpclient "${GLOBAL_ARGS[@]}" "${CONNECT_ARGS[@]}" >"$GP_LOG" 2>&1 &
+printf '%s\n' "$PASSWORD" | "${SETSID_PREFIX[@]}" pkexec env "${ENV_ARGS[@]}" gpclient "${GLOBAL_ARGS[@]}" "${CONNECT_ARGS[@]}" >"$GP_LOG" 2>&1 &
 VPN_PID=$!
 echo "$VPN_PID" > "$PID_FILE"
 

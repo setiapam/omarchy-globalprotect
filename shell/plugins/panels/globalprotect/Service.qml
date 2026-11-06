@@ -14,7 +14,9 @@ Item {
 
   readonly property bool active: status === "connected"
   readonly property bool running: status === "connected"
-  property bool busy: statusProc.running || upProc.running || downProc.running
+  // upProc deliberately stays alive for the whole VPN session, so it must not
+  // keep the toggle permanently "busy".
+  property bool busy: status === "connecting" || status === "disconnecting" || statusProc.running || downProc.running
 
   // Optimistic state while a connection/disconnection is in progress.
   property int _desired: -1
@@ -60,10 +62,11 @@ Item {
           root.pkgInstalled = (json.pkgInstalled !== undefined) ? json.pkgInstalled : true
           root.lastError = json.lastError || ""
 
-          // Do not overwrite the optimistic connecting/disconnecting state
-          // while the helper or gpclient is still starting.
-          if (!upProc.running && !downProc.running) {
-            root.status = json.status || "disconnected"
+          var next = json.status || "disconnected"
+          // While upProc is still authenticating, a transient "disconnected"
+          // poll must not turn the switch off. Once connected, _desired resets.
+          if (!(root._desired === 1 && next === "disconnected" && upProc.running)) {
+            root.status = next
           }
 
           if (json.uptimeSeconds !== null && json.uptimeSeconds !== undefined) {
