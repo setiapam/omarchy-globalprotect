@@ -103,6 +103,8 @@ else
   # With multiple external gateways gpclient otherwise prompts on a TTY.
   CONNECT_ARGS+=("--auto-gateway")
 fi
+# BPS gateways ask for a HIP report; without it internal hosts are blocked.
+CONNECT_ARGS+=("--hip")
 [[ "$NO_DTLS" == "true" ]] && CONNECT_ARGS+=("--no-dtls")
 [[ -n "$USERNAME" ]] && CONNECT_ARGS+=("--user" "$USERNAME")
 

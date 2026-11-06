@@ -110,7 +110,8 @@ The plugin strips `@bps.go.id` automatically if you enter it.
 5. `gpclient` discovers the gateway. If it needs a second SAML login, it
    launches the wrapper; the wrapper runs the hidden Chromium again and
    forwards the gateway callback to `gpclient`.
-6. `gpclient` builds the tunnel. No browser is launched.
+6. `gpclient` submits the HIP report required by the BPS gateway
+   (`--hip`), then builds the tunnel. No browser is launched.
 
 ### Security notes
 
@@ -188,6 +189,26 @@ the normal "invalid username or password" error), so the widget does not appear
 to be enforced there. If BPS starts enforcing it after valid credentials, the
 helper will report this error; use the browser fallback (`headless = false`) or
 a headed browser implementation.
+
+### The VPN is connected but an internal website keeps spinning
+
+The tunnel can be healthy while the browser still fails because the browser
+uses DNS-over-HTTPS and bypasses the VPN DNS. `community.bps.go.id` resolves to
+`10.0.11.52` via the tunnel; a DoH-enabled browser may resolve it elsewhere.
+
+Disable secure DNS/DoH in the browser:
+
+- **Brave/Chromium**: `brave://settings/security` or
+  `chrome://settings/security` → **Use secure DNS** → off (or use your current
+  service provider), then clear `brave://net-internals/#dns`.
+- **Firefox**: Settings → Privacy & Security → **Enable secure DNS** → off.
+
+Verify from a terminal:
+
+```bash
+getent ahosts community.bps.go.id   # should print 10.0.11.52
+curl -I https://community.bps.go.id/
+```
 
 ### "Gateway reports notunnel" / "No IP address received"
 
