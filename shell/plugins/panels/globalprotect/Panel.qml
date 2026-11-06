@@ -50,13 +50,15 @@ Panel {
     function installPackage() {}
   }
 
-  readonly property var vpn: {
-    if (bar && bar.shell && typeof bar.shell.serviceFor === "function") {
-      var service = bar.shell.serviceFor(root.moduleName)
-      if (service) return service
-    }
-    return emptyVpn
+  // The service can load after the widget, so resolve it with retries instead
+  // of a one-shot lookup inside the property binding. See ServiceResolver.qml.
+  ServiceResolver {
+    id: serviceResolver
+    host: root.bar ? root.bar.shell : null
+    moduleName: root.moduleName
   }
+
+  readonly property var vpn: serviceResolver.service || emptyVpn
 
   IpcHandler {
     target: root.ipcTarget

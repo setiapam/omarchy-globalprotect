@@ -67,6 +67,15 @@ opens a window on your desktop.
 `gpclient` needs root privileges for the tunnel, so connecting uses `pkexec`
 (Polkit). Disconnecting uses `pkexec` only when a session is actually active.
 
+When developing from a local checkout, changes to plugin QML are only picked up
+after a shell restart. Omarchy's plugin hot-reload rescans the manifest but
+Quickshell keeps the compiled component cached because the plugin directory
+lives outside the shell config folder:
+
+```bash
+omarchy-restart-shell
+```
+
 ## Configuration
 
 Open the bar widget and expand **Settings**, or edit
