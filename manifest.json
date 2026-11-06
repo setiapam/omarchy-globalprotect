@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "id": "setiapam.globalprotect",
   "name": "GlobalProtect VPN",
-  "version": "1.0.0",
-  "description": "GlobalProtect VPN client integration with SAML/SSO support via gpclient / openconnect",
+  "version": "1.1.0",
+  "description": "GlobalProtect VPN client with headless SAML + TOTP login via gpclient / openconnect",
   "kinds": ["bar-widget"],
   "author": "setiapam",
   "entryPoints": {
@@ -11,7 +11,7 @@
   },
   "barWidget": {
     "displayName": "GlobalProtect VPN",
-    "description": "GlobalProtect VPN client with SAML/SSO support",
+    "description": "GlobalProtect VPN client with headless SAML + TOTP login",
     "category": "System",
     "allowMultiple": false
   },

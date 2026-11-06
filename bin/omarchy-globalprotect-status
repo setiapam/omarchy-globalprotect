@@ -1,52 +1,48 @@
 #!/bin/bash
-# omarchy:summary=Check GlobalProtect connection status
+# omarchy:summary=Check GlobalProtect VPN status
 # omarchy:args=[config_name]
 
 set -euo pipefail
 
 CONFIG_NAME="${1:-config}"
+RUN_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omarchy-globalprotect"
+PID_FILE="$RUN_DIR/${CONFIG_NAME}.pid"
+ERROR_FILE="$RUN_DIR/${CONFIG_NAME}.error"
 CONFIG_FILE="$HOME/.config/globalprotect/$CONFIG_NAME"
 
 status="disconnected"
 pid=""
-portal="vpn.bps.go.id"
+portal=""
 uptime_secs="null"
 pkg_installed="false"
+last_error=""
 
-if command -v globalprotect >/dev/null 2>&1; then
+if command -v gpclient >/dev/null 2>&1; then
   pkg_installed="true"
 fi
 
 if [[ -f "$CONFIG_FILE" ]]; then
-  cfg_p=$(grep -E "^[[:space:]]*portal[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' ' || true)
-  [[ -n "$cfg_p" ]] && portal="$cfg_p"
+  portal=$(grep -i "^portal[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null | head -1 | sed 's/^portal[[:space:]]*=[[:space:]]*//' | tr -d '[:space:]' || echo "")
 fi
 
-# TUN devices may report operstate UNKNOWN while fully connected.
-# An active gpd0 with an assigned IPv4 address is the fast polling path.
-tunnel_active=false
-if [[ -r /sys/class/net/gpd0/flags ]]; then
-  tunnel_flags=$(cat /sys/class/net/gpd0/flags)
-  if (( tunnel_flags & 1 )) && ip -o -4 address show dev gpd0 | grep -q ' inet ' && pgrep -x PanGPS >/dev/null; then
-    tunnel_active=true
-  fi
+if [[ -f "$ERROR_FILE" ]]; then
+  last_error=$(tr '\n\t' '  ' < "$ERROR_FILE" 2>/dev/null | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | cut -c1-300 || true)
 fi
 
-if [[ "$tunnel_active" == "true" ]]; then
+# Prefer the gpclient process, which is the authoritative signal. Also accept
+# a gpd* interface, but do not treat an unrelated tun* (another VPN) as ours.
+vpn_dev=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^gpd[0-9]*$' | head -1 || true)
+
+# Find an active gpclient process. This catches the brief period before the
+# tunnel device appears.
+active_pid=$(pgrep -f "gpclient connect" 2>/dev/null | head -1 || true)
+
+# The headless SAML helper runs before gpclient starts.
+auth_pid=$(pgrep -f "python3 .*omarchy-globalprotect-auth" 2>/dev/null | head -1 || true)
+
+if [[ -n "$active_pid" || -n "$vpn_dev" ]]; then
   status="connected"
-else
-  # Preserve any useful output even if the CLI exits on timeout.
-  cli_output=$(timeout 5 globalprotect show --status 2>/dev/null || true)
-  gp_status=$(printf '%s' "$cli_output" | tr '\r' '\n' | grep -i "GlobalProtect status:" | tr '[:upper:]' '[:lower:]' || true)
-  if [[ "$gp_status" =~ "connected" ]] && ! [[ "$gp_status" =~ (disconnected|disabled) ]]; then
-    status="connected"
-  elif [[ "$gp_status" =~ (connecting|discovering|retrieving) ]]; then
-    status="connecting"
-  fi
-fi
-
-if [[ "$status" == "connected" ]]; then
-  pid=$(pgrep -x PanGPS | head -1 || echo "")
+  pid="${active_pid:-}"
   if [[ -n "$pid" && -d "/proc/$pid" ]]; then
     start_time=$(stat -c %Y "/proc/$pid" 2>/dev/null || echo "")
     if [[ -n "$start_time" ]]; then
@@ -54,7 +50,18 @@ if [[ "$status" == "connected" ]]; then
       uptime_secs=$(( now - start_time ))
     fi
   fi
+elif [[ -n "$auth_pid" ]]; then
+  status="connecting"
+  pid="$auth_pid"
+elif [[ -f "$PID_FILE" ]]; then
+  file_pid=$(cat "$PID_FILE" 2>/dev/null || echo "")
+  if [[ -n "$file_pid" ]] && kill -0 "$file_pid" 2>/dev/null; then
+    status="connecting"
+    pid="$file_pid"
+  else
+    rm -f "$PID_FILE"
+  fi
 fi
 
-# Print single-line JSON to prevent SplitParser line-buffering JSON.parse issues
-echo "{\"status\":\"$status\",\"pid\":\"$pid\",\"portal\":\"$portal\",\"config\":\"$CONFIG_NAME\",\"pkgInstalled\":$pkg_installed,\"uptimeSeconds\":$uptime_secs}"
+# Print single-line JSON.
+echo "{\"status\":\"$status\",\"pid\":\"$pid\",\"portal\":\"$portal\",\"config\":\"$CONFIG_NAME\",\"pkgInstalled\":$pkg_installed,\"uptimeSeconds\":$uptime_secs,\"lastError\":\"$last_error\"}"

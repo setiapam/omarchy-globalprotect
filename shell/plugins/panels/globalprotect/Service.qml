@@ -9,32 +9,37 @@ Item {
   property string portal: ""
   property int uptimeSeconds: 0
   property bool pkgInstalled: true
+  property string lastError: ""
   property string configError: ""
 
   readonly property bool active: status === "connected"
   readonly property bool running: status === "connected"
   property bool busy: statusProc.running || upProc.running || downProc.running
 
-  // uiActive matches active directly, no auto-reconnect lock
-  readonly property bool uiActive: active
+  // Optimistic state while a connection/disconnection is in progress.
+  property int _desired: -1
+  readonly property bool uiActive: _desired === -1 ? (active || status === "connecting") : (_desired === 1)
 
   function refresh() {
     if (!statusProc.running) statusProc.running = true
   }
 
   function toggle() {
-    if (active) down()
+    if (uiActive) down()
     else up()
   }
 
   function up() {
     if (upProc.running) return
+    _desired = 1
     status = "connecting"
+    lastError = ""
     upProc.running = true
   }
 
   function down() {
     if (downProc.running) return
+    _desired = 0
     status = "disconnecting"
     downProc.running = true
   }
@@ -51,14 +56,28 @@ Item {
       onRead: function(data) {
         try {
           var json = JSON.parse(data)
-          root.status = json.status || "disconnected"
           root.portal = json.portal || ""
           root.pkgInstalled = (json.pkgInstalled !== undefined) ? json.pkgInstalled : true
+          root.lastError = json.lastError || ""
+
+          // Do not overwrite the optimistic connecting/disconnecting state
+          // while the helper or gpclient is still starting.
+          if (!upProc.running && !downProc.running) {
+            root.status = json.status || "disconnected"
+          }
+
           if (json.uptimeSeconds !== null && json.uptimeSeconds !== undefined) {
              root.uptimeSeconds = json.uptimeSeconds
           }
+
+          if (root._desired !== -1 && root.active === (root._desired === 1)) {
+             root._desired = -1
+          }
         } catch (e) {}
       }
+    }
+    onExited: function() {
+       if (root.status === "disconnected" && root._desired === 0) root._desired = -1
     }
   }
 
@@ -66,6 +85,7 @@ Item {
     id: upProc
     command: ["bash", "-c", "~/.config/omarchy/plugins/setiapam.globalprotect/bin/omarchy-globalprotect-up"]
     onExited: function() {
+      root._desired = -1
       root.refresh()
     }
   }
@@ -74,13 +94,14 @@ Item {
     id: downProc
     command: ["bash", "-c", "~/.config/omarchy/plugins/setiapam.globalprotect/bin/omarchy-globalprotect-down"]
     onExited: function() {
+      root._desired = -1
       root.refresh()
     }
   }
 
   Process {
     id: installProc
-    command: ["omarchy-launch-terminal", "omarchy-pkg-add", "globalprotect-openconnect"]
+    command: ["omarchy-launch-terminal", "omarchy-pkg-add", "globalprotect-openconnect", "python-requests"]
     onExited: function() { root.refresh() }
   }
 

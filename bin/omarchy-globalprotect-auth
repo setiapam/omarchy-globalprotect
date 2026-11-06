@@ -1,0 +1,792 @@
+#!/usr/bin/env python3
+"""Headless GlobalProtect SAML login with automatic TOTP.
+
+This helper performs the same redirect/form dance a browser would perform for
+Palo Alto GlobalProtect SAML authentication, but without opening a browser. It
+also generates the TOTP code from a Base32 secret (or otpauth:// URI) when the
+identity provider asks for a second factor.
+
+The result is a single line of JSON in the format expected by:
+
+    gpclient connect <portal> --cookie-on-stdin
+
+Only the Python standard library and `requests` are required.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import hmac
+import html as html_mod
+import json
+import os
+import re
+import struct
+import sys
+import time
+import warnings
+from dataclasses import dataclass
+from typing import Iterable, Optional
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
+
+try:
+    import requests
+except ImportError:  # pragma: no cover - only hit on an incomplete install
+    print(
+        "omarchy-globalprotect-auth: python-requests is required "
+        "(install it with: omarchy-pkg-add python-requests)",
+        file=sys.stderr,
+    )
+    raise SystemExit(3)
+
+
+DEFAULT_CONFIG = os.path.expanduser("~/.config/globalprotect/config")
+DEFAULT_PORTAL = "vpn.bps.go.id"
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36"
+)
+
+
+class AuthError(Exception):
+    """A user-actionable authentication failure."""
+
+
+def log(message: str) -> None:
+    print(f"[gp-auth] {message}", file=sys.stderr, flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Configuration / TOTP
+# ---------------------------------------------------------------------------
+
+
+def read_config(path: str) -> dict[str, str]:
+    config: dict[str, str] = {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                config[key.strip().lower().replace("_", "-")] = value.strip()
+    except FileNotFoundError:
+        pass
+    return config
+
+
+def config_value(config: dict[str, str], *names: str, default: str = "") -> str:
+    for name in names:
+        key = name.lower().replace("_", "-")
+        if key in config and config[key] != "":
+            return config[key]
+    return default
+
+
+def as_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def normalize_secret(secret: str) -> str:
+    return re.sub(r"[\s-]", "", secret).strip().upper().rstrip("=")
+
+
+@dataclass(frozen=True)
+class TotpSpec:
+    secret: str = ""
+    digits: int = 6
+    period: int = 30
+    algorithm: str = "SHA1"
+    static_code: str = ""
+
+
+def parse_totp_spec(value: str) -> TotpSpec:
+    value = (value or "").strip()
+    if not value:
+        return TotpSpec()
+
+    if value.lower().startswith("otpauth://"):
+        parsed = urlparse(value)
+        query = parse_qs(parsed.query)
+        secret = normalize_secret(query.get("secret", [""])[0])
+        digits = int(query.get("digits", ["6"])[0])
+        period = int(query.get("period", ["30"])[0])
+        algorithm = query.get("algorithm", ["SHA1"])[0].upper()
+        return TotpSpec(secret=secret, digits=digits, period=period, algorithm=algorithm)
+
+    # A literal 6/8 digit value is treated as a one-shot code. This is useful
+    # for manual testing, but a real Base32 secret is what enables automation.
+    if re.fullmatch(r"\d{6,8}", value):
+        return TotpSpec(static_code=value)
+
+    return TotpSpec(secret=normalize_secret(value))
+
+
+def totp_code(spec: TotpSpec, at: Optional[float] = None, skew: int = 0) -> str:
+    if spec.static_code:
+        return spec.static_code
+    if not spec.secret:
+        raise AuthError("TOTP secret is empty")
+
+    try:
+        key = base64.b32decode(
+            spec.secret + "=" * ((8 - len(spec.secret) % 8) % 8),
+            casefold=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - report a useful message
+        raise AuthError(f"TOTP secret is not valid Base32: {exc}") from exc
+
+    algorithm = spec.algorithm.upper()
+    if algorithm not in {"SHA1", "SHA256", "SHA512"}:
+        raise AuthError(f"Unsupported TOTP algorithm: {spec.algorithm}")
+
+    now = time.time() if at is None else at
+    counter = int(now // spec.period) + skew
+    digest = hmac.new(
+        key,
+        struct.pack(">Q", counter),
+        getattr(hashlib, algorithm.lower()),
+    ).digest()
+    offset = digest[-1] & 0x0F
+    number = (struct.unpack(">I", digest[offset : offset + 4])[0] & 0x7FFFFFFF) % (
+        10**spec.digits
+    )
+    return str(number).zfill(spec.digits)
+
+
+def wait_for_fresh_totp(spec: TotpSpec, minimum_remaining: float = 2.0) -> None:
+    """Avoid submitting a code in the last two seconds of its window."""
+    if spec.static_code or not spec.secret:
+        return
+    remaining = spec.period - (time.time() % spec.period)
+    if remaining < minimum_remaining:
+        time.sleep(remaining + 0.5)
+
+
+# ---------------------------------------------------------------------------
+# HTML form handling
+# ---------------------------------------------------------------------------
+
+
+def attr(tag: str, name: str) -> Optional[str]:
+    match = re.search(
+        rf"\b{re.escape(name)}\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))",
+        tag,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    value = match.group(1)
+    if value is None:
+        value = match.group(2)
+    if value is None:
+        value = match.group(3)
+    return html_mod.unescape(value)
+
+
+def strip_tags(fragment: str) -> str:
+    fragment = re.sub(r"<(script|style)\b.*?</\1>", " ", fragment, flags=re.S | re.I)
+    fragment = re.sub(r"<[^>]+>", " ", fragment)
+    return re.sub(r"\s+", " ", html_mod.unescape(fragment)).strip()
+
+
+@dataclass
+class Form:
+    action: str
+    method: str
+    inputs: dict[str, str]
+    text: str
+    html: str
+
+
+def parse_forms(page: str, base_url: str) -> list[Form]:
+    forms: list[Form] = []
+    for match in re.finditer(r"<form\b.*?</form>", page, re.S | re.I):
+        fragment = match.group(0)
+        start = re.match(r"<form\b[^>]*>", fragment, re.S | re.I)
+        open_tag = start.group(0) if start else ""
+        action = attr(open_tag, "action") or base_url
+        action = urljoin(base_url, action)
+        method = (attr(open_tag, "method") or "post").lower()
+
+        inputs: dict[str, str] = {}
+        for input_tag in re.findall(r"<input\b[^>]*>", fragment, re.I):
+            name = attr(input_tag, "name")
+            if not name:
+                continue
+            input_type = (attr(input_tag, "type") or "text").lower()
+            if input_type in {"submit", "button", "reset", "file", "image"}:
+                continue
+            if input_type in {"checkbox", "radio"} and not re.search(
+                r"\bchecked\b", input_tag, re.I
+            ):
+                continue
+            inputs[name] = attr(input_tag, "value") or ""
+
+        # Keycloak uses <button name="login"> and <button name="select">.
+        for button_tag in re.findall(r"<button\b.*?</button>", fragment, re.S | re.I):
+            name = attr(button_tag, "name")
+            if name:
+                inputs.setdefault(name, attr(button_tag, "value") or "")
+
+        forms.append(
+            Form(
+                action=action,
+                method=method,
+                inputs=inputs,
+                text=strip_tags(fragment),
+                html=fragment,
+            )
+        )
+    return forms
+
+
+def submit_form(
+    session: requests.Session,
+    form: Form,
+    timeout: float,
+    overrides: Optional[dict[str, str]] = None,
+) -> requests.Response:
+    data = dict(form.inputs)
+    if overrides:
+        data.update(overrides)
+    if form.method == "get":
+        return request(session, "GET", form.action, timeout=timeout, params=data)
+    return request(session, "POST", form.action, timeout=timeout, data=data)
+
+
+def request(
+    session: requests.Session,
+    method: str,
+    url: str,
+    timeout: float,
+    **kwargs,
+) -> requests.Response:
+    last_error: Optional[Exception] = None
+    for attempt in range(3):
+        try:
+            return session.request(
+                method,
+                url,
+                timeout=timeout,
+                allow_redirects=True,
+                **kwargs,
+            )
+        except requests.RequestException as exc:  # noqa: PERF203 - retry loop
+            last_error = exc
+            if attempt < 2:
+                time.sleep(1.0)
+    raise AuthError(f"Network error while contacting {url}: {last_error}")
+
+
+# ---------------------------------------------------------------------------
+# GlobalProtect / Keycloak flow
+# ---------------------------------------------------------------------------
+
+
+def normalize_portal(portal: str) -> str:
+    portal = (portal or DEFAULT_PORTAL).strip()
+    portal = re.sub(r"^https?://", "", portal, flags=re.I).rstrip("/")
+    return portal.split("/", 1)[0]
+
+
+def extract_tag(text: str, name: str) -> Optional[str]:
+    match = re.search(rf"<{re.escape(name)}>(.*?)</{re.escape(name)}>", text, re.S | re.I)
+    if not match:
+        return None
+    value = html_mod.unescape(match.group(1)).strip()
+    return value or None
+
+
+def parse_auth_html(text: str) -> Optional[dict[str, str]]:
+    status = extract_tag(text, "saml-auth-status")
+    if status is not None and status != "1":
+        message = extract_tag(text, "msg") or extract_tag(text, "newmsg") or ""
+        raise AuthError(
+            f"GlobalProtect rejected the SAML login (saml-auth-status={status})"
+            + (f": {message}" if message else "")
+        )
+
+    username = extract_tag(text, "saml-username") or ""
+    prelogin_cookie = extract_tag(text, "prelogin-cookie") or ""
+    portal_userauthcookie = extract_tag(text, "portal-userauthcookie") or ""
+    token = extract_tag(text, "token") or ""
+
+    if not prelogin_cookie and not portal_userauthcookie and not token:
+        return None
+
+    auth: dict[str, str] = {"username": username}
+    if prelogin_cookie:
+        auth["preloginCookie"] = prelogin_cookie
+    if portal_userauthcookie:
+        auth["portalUserauthcookie"] = portal_userauthcookie
+    if token:
+        auth["token"] = token
+    return auth
+
+
+def decode_callback(raw: str) -> Optional[dict[str, str]]:
+    raw = html_mod.unescape(raw).strip().strip("'\"").rstrip(";")
+    raw = raw.lstrip("/")
+    if not raw:
+        return None
+
+    if raw.startswith("cas-as"):
+        parsed = parse_qs(raw)
+        auth: dict[str, str] = {}
+        if parsed.get("un"):
+            auth["username"] = parsed["un"][0]
+        if parsed.get("token"):
+            auth["token"] = parsed["token"][0]
+        return auth or None
+
+    candidate = unquote(raw)
+    candidate = candidate + "=" * ((4 - len(candidate) % 4) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(candidate.encode("ascii")).decode(
+            "utf-8", "replace"
+        )
+    except Exception:  # noqa: BLE001 - not every page is a callback
+        return None
+    return parse_auth_html(decoded)
+
+
+def extract_auth_data(page: str) -> Optional[dict[str, str]]:
+    # The SAML ACS page normally embeds the auth data in a
+    # globalprotectcallback:<base64> URL.
+    for match in re.finditer(r"globalprotectcallback:\s*([^\s\"'<>]+)", page, re.I):
+        auth = decode_callback(match.group(1))
+        if auth:
+            return auth
+
+    # Some portal versions return the XML/HTML tags directly.
+    auth = parse_auth_html(page)
+    if auth:
+        return auth
+    return None
+
+
+def find_sso_link(page: str) -> Optional[str]:
+    links = re.findall(r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>", page, re.I)
+    candidates: list[tuple[int, str]] = []
+    for href in links:
+        lowered = href.lower()
+        if "broker" not in lowered and "vpn-broker" not in lowered:
+            continue
+        score = 0
+        if "pegawai" in lowered:
+            score += 10
+        if "employee" in lowered:
+            score += 5
+        if "sso" in lowered:
+            score += 1
+        candidates.append((score, href))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return html_mod.unescape(candidates[0][1])
+
+
+def find_otp_field(form: Form) -> Optional[str]:
+    for name in ("otp", "totp", "oneTimeCode", "code"):
+        if name in form.inputs:
+            return name
+    for name in form.inputs:
+        if name.lower() in {"otp", "totp", "onetimecode", "code"}:
+            return name
+    return None
+
+
+def looks_like_otp(text: str) -> bool:
+    lowered = text.lower()
+    positive = (
+        "authenticator",
+        "one-time",
+        "one time",
+        "totp",
+        "otp",
+        "verification code",
+        "kode verifikasi",
+        "aplikasi authenticator",
+    )
+    negative = ("passkey", "webauthn", "security key", "recovery code")
+    return any(word in lowered for word in positive) and not any(
+        word in lowered for word in negative
+    )
+
+
+def submit_alternative(session: requests.Session, response: requests.Response, timeout: float) -> Optional[requests.Response]:
+    """Advance through Keycloak's "Try another way" / authenticator chooser."""
+    forms = parse_forms(response.text, response.url)
+
+    # Step 1: choose the OTP/authenticator option, not a passkey option.
+    # Do this before submitting the "Try Another Way" form, otherwise a
+    # chooser page that also contains that form could loop back to itself.
+    choices: list[tuple[int, Form]] = []
+    for form in forms:
+        if "authenticationExecution" not in form.inputs:
+            continue
+        score = 10 if looks_like_otp(form.text) else 0
+        if "select" in form.inputs:
+            score += 2
+        choices.append((score, form))
+    if choices:
+        choices.sort(key=lambda item: item[0], reverse=True)
+        score, form = choices[0]
+        if score >= 10:
+            log("Selecting authenticator app / OTP")
+            return submit_form(session, form, timeout)
+        labels = ", ".join(form.text[:80] for _, form in choices) or "unknown"
+        raise AuthError(
+            "The identity provider asks for an alternative login method, but no "
+            f"TOTP/authenticator option was found. Available: {labels}"
+        )
+
+    # Step 2: open the "Try Another Way" chooser if it is only a link/form.
+    for form in forms:
+        if "tryAnotherWay" in form.inputs and "authenticationExecution" not in form.inputs:
+            log("Opening alternative login methods")
+            return submit_form(session, form, timeout)
+
+    # Step 3: follow a plain link to an alternative method.
+    for match in re.finditer(r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", response.text, re.S | re.I):
+        href, label = match.group(1), strip_tags(match.group(2))
+        if looks_like_otp(label):
+            log(f"Following alternative login link: {label or href}")
+            return request(session, "GET", urljoin(response.url, html_mod.unescape(href)), timeout)
+
+    return None
+
+
+def detect_error(page: str) -> Optional[str]:
+    text = strip_tags(page)
+    lowered = text.lower()
+
+    if any(
+        phrase in lowered
+        for phrase in (
+            "turnstile",
+            "captcha",
+            "verify you are human",
+            "verify that you are human",
+            "cf-chl-",
+        )
+    ):
+        return (
+            "The identity provider is asking for a Cloudflare Turnstile/CAPTCHA "
+            "challenge. Headless login is blocked by the server; use the browser "
+            "fallback in the plugin settings."
+        )
+
+    if any(
+        phrase in lowered
+        for phrase in (
+            "invalid username or password",
+            "invalid user name or password",
+            "invalid credentials",
+            "incorrect username or password",
+        )
+    ):
+        return "Username or password is incorrect."
+
+    if "account is disabled" in lowered or "account disabled" in lowered:
+        return "The account is disabled."
+
+    if "temporarily disabled" in lowered or "too many failed attempts" in lowered:
+        return "The account is temporarily locked after too many failed attempts."
+
+    if any(
+        phrase in lowered
+        for phrase in (
+            "invalid authenticator code",
+            "invalid otp",
+            "invalid code",
+            "code is invalid",
+            "verification code is invalid",
+            "kode salah",
+            "kode tidak valid",
+        )
+    ):
+        return "The TOTP code was rejected. Check the secret and the system clock."
+
+    if "session expired" in lowered or "restart login" in lowered:
+        return "The login session expired. Try again."
+
+    return None
+
+
+def run_auth(
+    *,
+    portal: str,
+    username: str,
+    password: str,
+    totp: str,
+    totp_skew: int = 0,
+    timeout: float,
+    verify_tls: bool,
+    dump_dir: Optional[str] = None,
+) -> dict[str, str]:
+    portal = normalize_portal(portal)
+    if not username:
+        raise AuthError("Username is empty")
+    if not password:
+        raise AuthError("Password is empty")
+
+    # Keycloak's BPS employee realm wants the bare username.
+    login_username = re.sub(r"@bps\.go\.id$", "", username.strip(), flags=re.I)
+
+    spec = parse_totp_spec(totp)
+    if not spec.secret and not spec.static_code:
+        raise AuthError("TOTP secret is empty")
+
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": DEFAULT_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
+        }
+    )
+    session.verify = verify_tls
+    if not verify_tls:
+        warnings.filterwarnings("ignore", message="Unverified HTTPS request")
+
+    log(f"Starting SAML login for {login_username} at {portal}")
+    response = request(
+        session,
+        "GET",
+        f"https://{portal}/global-protect/login.esp",
+        timeout,
+    )
+
+    submitted_username = False
+    submitted_credentials = False
+    submitted_otp = False
+    alternative_attempts = 0
+
+    for step in range(20):
+        auth = extract_auth_data(response.text or "")
+        if auth:
+            if not auth.get("username"):
+                auth["username"] = login_username
+            log("SAML authentication succeeded")
+            return auth
+
+        if dump_dir:
+            os.makedirs(dump_dir, mode=0o700, exist_ok=True)
+            path = os.path.join(dump_dir, f"step-{step:02d}.html")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(response.text or "")
+            log(f"Saved {path}")
+
+        forms = parse_forms(response.text or "", response.url)
+
+        # 1. The initial GlobalProtect page and the SAML POST binding both
+        #    auto-submit a form containing SAMLRequest/SAMLResponse.
+        saml_forms = [
+            form
+            for form in forms
+            if "SAMLRequest" in form.inputs or "SAMLResponse" in form.inputs
+        ]
+        if saml_forms and (
+            "submit()" in response.text
+            or "onload" in response.text.lower()
+            or "myform" in response.text
+        ):
+            log(f"Submitting SAML form to {saml_forms[0].action}")
+            response = submit_form(session, saml_forms[0], timeout)
+            continue
+
+        # 2. Choose the BPS employee broker on the Keycloak selector page.
+        sso_link = find_sso_link(response.text or "")
+        if sso_link:
+            log("Selecting SSO PEGAWAI BPS")
+            response = request(session, "GET", urljoin(response.url, sso_link), timeout)
+            continue
+
+        # 3. Username-first form (some Keycloak flows split username and
+        #    password into two pages).
+        username_forms = [
+            form
+            for form in forms
+            if "username" in form.inputs and "password" not in form.inputs
+        ]
+        if username_forms and not submitted_username and not submitted_credentials:
+            form = username_forms[0]
+            log("Submitting username")
+            response = submit_form(session, form, timeout, {"username": login_username})
+            submitted_username = True
+            continue
+
+        # 4. Username/password form.
+        password_forms = [
+            form
+            for form in forms
+            if "username" in form.inputs and "password" in form.inputs
+        ]
+        if password_forms and not submitted_credentials:
+            form = password_forms[0]
+            overrides = {
+                "username": login_username,
+                "password": password,
+            }
+            # Cloudflare Turnstile is rendered on this form. The BPS server
+            # currently accepts an empty token; if it does not, detect_error()
+            # will return a clear message and the user can use browser mode.
+            if "cf-turnstile-response" in form.inputs:
+                overrides["cf-turnstile-response"] = ""
+            log("Submitting username and password")
+            response = submit_form(session, form, timeout, overrides)
+            submitted_credentials = True
+            continue
+
+        # 5. TOTP form.
+        otp_forms = [form for form in forms if find_otp_field(form)]
+        if otp_forms and not submitted_otp:
+            wait_for_fresh_totp(spec)
+            code = totp_code(spec, skew=totp_skew)
+            form = otp_forms[0]
+            field = find_otp_field(form)
+            assert field is not None
+            log(f"Submitting TOTP code ({len(code)} digits)")
+            response = submit_form(session, form, timeout, {field: code})
+            submitted_otp = True
+            continue
+
+        # 6. Surface a useful error before trying alternative login methods.
+        error = detect_error(response.text or "")
+        if error:
+            raise AuthError(error)
+
+        # 7. Keycloak "Try another way" / authenticator chooser.
+        if alternative_attempts < 3:
+            alternative = submit_alternative(session, response, timeout)
+            if alternative is not None:
+                alternative_attempts += 1
+                response = alternative
+                continue
+
+        # 8. Nothing matched.
+
+        title = re.search(r"<title[^>]*>(.*?)</title>", response.text or "", re.S | re.I)
+        title_text = strip_tags(title.group(1)) if title else ""
+        raise AuthError(
+            "Login flow stopped at an unrecognized page"
+            + (f" ({title_text})" if title_text else "")
+            + f": {response.url}. Re-run with --dump-dir to inspect the pages."
+        )
+
+    raise AuthError("Too many redirects/forms; the login flow did not finish.")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Headless GlobalProtect SAML + TOTP login",
+    )
+    parser.add_argument("--config", default=DEFAULT_CONFIG, help="Configuration file")
+    parser.add_argument("--portal", help="Portal server, e.g. vpn.bps.go.id")
+    parser.add_argument("--username", help="VPN username")
+    parser.add_argument("--password", help="VPN password")
+    parser.add_argument(
+        "--totp",
+        help="Base32 TOTP secret, otpauth:// URI, or a literal one-shot code",
+    )
+    parser.add_argument(
+        "--totp-skew",
+        type=int,
+        default=0,
+        help="Shift the TOTP counter by N steps (rarely needed)",
+    )
+    parser.add_argument("--timeout", type=float, default=30.0, help="HTTP timeout")
+    parser.add_argument(
+        "--ignore-tls-errors",
+        action="store_true",
+        help="Do not verify the portal/IdP TLS certificates",
+    )
+    parser.add_argument(
+        "--dump-dir",
+        help="Save each HTML page to this directory (debugging)",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("json", "callback"),
+        default="json",
+        help="json: gpclient --cookie-on-stdin; callback: globalprotectcallback:...",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Only verify the login; do not print the session cookies",
+    )
+    return parser
+
+
+def main(argv: Optional[Iterable[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    config = read_config(args.config)
+
+    portal = args.portal or config_value(config, "portal", default=DEFAULT_PORTAL)
+    username = args.username or config_value(config, "username")
+    password = args.password if args.password is not None else config_value(config, "password")
+    totp = args.totp if args.totp is not None else config_value(
+        config, "totp", "totp-secret", "totp-uri"
+    )
+    ignore_tls = args.ignore_tls_errors or as_bool(
+        config_value(config, "ignore-tls-errors"), default=False
+    )
+    skew = args.totp_skew or int(config_value(config, "totp-skew", default="0") or 0)
+
+    try:
+        auth = run_auth(
+            portal=portal,
+            username=username,
+            password=password,
+            totp=totp,
+            totp_skew=skew,
+            timeout=args.timeout,
+            verify_tls=not ignore_tls,
+            dump_dir=args.dump_dir,
+        )
+    except AuthError as exc:
+        log(f"ERROR: {exc}")
+        return 2
+    except KeyboardInterrupt:
+        log("Cancelled")
+        return 130
+
+    if args.check:
+        print("Authentication OK")
+        return 0
+
+    if args.format == "callback":
+        # gpclient's globalprotectcallback parser expects a base64-encoded
+        # HTML fragment containing the saml-* tags, not JSON.
+        fragment = (
+            "<html><body>"
+            "<saml-auth-status>1</saml-auth-status>"
+            f"<saml-username>{html_mod.escape(auth.get('username', ''))}</saml-username>"
+            f"<prelogin-cookie>{html_mod.escape(auth.get('preloginCookie', ''))}</prelogin-cookie>"
+            f"<portal-userauthcookie>{html_mod.escape(auth.get('portalUserauthcookie', ''))}</portal-userauthcookie>"
+            f"<token>{html_mod.escape(auth.get('token', ''))}</token>"
+            "</body></html>"
+        )
+        print("globalprotectcallback:" + base64.b64encode(fragment.encode("utf-8")).decode("ascii"))
+    else:
+        print(json.dumps({"success": auth}, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

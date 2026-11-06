@@ -4,7 +4,41 @@
 
 set -euo pipefail
 
-# Terminate active connect CLI command and issue disconnect
-pkill -x globalprotect 2>/dev/null || true
-globalprotect disconnect || true
+CONFIG_NAME="${1:-config}"
+RUN_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omarchy-globalprotect"
+PID_FILE="$RUN_DIR/${CONFIG_NAME}.pid"
+ERROR_FILE="$RUN_DIR/${CONFIG_NAME}.error"
+AUTH_LOG="$RUN_DIR/${CONFIG_NAME}-auth.log"
+
+echo "==> Disconnecting GlobalProtect VPN..."
+
+# gpclient runs as root. Its lock file contains the PID of the active client.
+# Use pkexec only when there is actually something to stop, so a simple
+# disconnect does not always trigger a polkit prompt.
+if command -v gpclient >/dev/null 2>&1; then
+  if [[ -f /var/run/gpclient.lock || -f "$PID_FILE" ]] || pgrep -f "gpclient connect" >/dev/null 2>&1; then
+    pkexec env TMPDIR=/tmp gpclient disconnect --wait 3 >/dev/null 2>&1 || \
+      gpclient disconnect --wait 3 >/dev/null 2>&1 || true
+  fi
+fi
+
+if [[ -f "$PID_FILE" ]]; then
+  pid=$(cat "$PID_FILE" 2>/dev/null || true)
+  if [[ -n "$pid" ]]; then
+    kill "$pid" 2>/dev/null || true
+  fi
+  rm -f "$PID_FILE"
+fi
+
+# Stop a headless authentication helper that may still be running.
+pkill -f "python3 .*omarchy-globalprotect-auth" 2>/dev/null || true
+
+# Best-effort cleanup of older gpauth/gpclient helpers.
+pkill -f "gpclient launch-gui" 2>/dev/null || true
+pkill -x gpgui 2>/dev/null || true
+pkill -x gpauth 2>/dev/null || true
+rm -f /tmp/gpcallback.port 2>/dev/null || true
+
+rm -f "$ERROR_FILE"
+echo "✓ VPN disconnected"
 omarchy-notification-send "GlobalProtect" "Disconnected" 2>/dev/null || true

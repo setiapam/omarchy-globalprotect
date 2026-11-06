@@ -1,49 +1,229 @@
-#!/bin/bash
-# omarchy:summary=Read or write GlobalProtect configuration
-# omarchy:args=[action] [args...]
+#!/usr/bin/env python3
+"""Read/write the GlobalProtect plugin configuration.
 
-set -euo pipefail
+The file is intentionally a simple `key = value` file so it can be inspected
+and edited by hand. It is kept at mode 0600 because it may contain a password
+and a TOTP secret.
+"""
 
-CONFIG_DIR="$HOME/.config/globalprotect"
-CONFIG_FILE="$CONFIG_DIR/config"
-mkdir -p "$CONFIG_DIR"
+from __future__ import annotations
 
-action="${1:-read-all}"
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from typing import Iterable
 
-case "$action" in
-  read-all)
-    portal="vpn.bps.go.id"
-    username="setia.pambudi"
-    browser="brave"
+CONFIG_DIR = os.path.expanduser("~/.config/globalprotect")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config")
 
-    if [[ -f "$CONFIG_FILE" ]]; then
-      p=$(grep -E "^[[:space:]]*portal[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' ' || true)
-      [[ -n "$p" ]] && portal="$p"
-      u=$(grep -E "^[[:space:]]*username[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' ' || true)
-      [[ -n "$u" ]] && username="$u"
-      b=$(grep -E "^[[:space:]]*browser[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' ' || true)
-      [[ -n "$b" ]] && browser="$b"
-    fi
+# Keep this order in sync with ConfigPanel.qml.
+WRITE_ORDER = (
+    "portal",
+    "gateway",
+    "username",
+    "password",
+    "saml",
+    "totp",
+    "headless",
+    "browser",
+    "ignore-tls-errors",
+    "fix-openssl",
+    "no-dtls",
+)
 
-    echo "{\"portal\":\"$portal\",\"username\":\"$username\",\"browser\":\"$browser\"}"
-    ;;
+DEFAULTS = {
+    "portal": "vpn.bps.go.id",
+    "gateway": "",
+    "username": "",
+    "password": "",
+    "saml": "true",
+    "totp": "",
+    "headless": "true",
+    "browser": "default",
+    "ignore-tls-errors": "false",
+    "fix-openssl": "false",
+    "no-dtls": "false",
+}
 
-  write)
-    portal="${2:-vpn.bps.go.id}"
-    username="${3:-setia.pambudi}"
-    browser="${4:-brave}"
+BOOLEAN_KEYS = {"saml", "headless", "ignore-tls-errors", "fix-openssl", "no-dtls"}
 
-    cat << CFGEOF > "$CONFIG_FILE"
-# GlobalProtect VPN Configuration for BPS
-portal = $portal
-username = $username
-browser = $browser
-CFGEOF
-    echo "{\"status\":\"ok\"}"
-    ;;
 
-  *)
-    echo "Usage: $0 [read-all|write <portal> <username> <browser>]"
-    exit 1
-    ;;
-esac
+def normalize_key(key: str) -> str:
+    return key.strip().lower().replace("_", "-")
+
+
+def parse_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def read_raw() -> list[str]:
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as handle:
+            return handle.readlines()
+    except FileNotFoundError:
+        return []
+
+
+def read_values() -> dict[str, str]:
+    values = dict(DEFAULTS)
+    for raw_line in read_raw():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[normalize_key(key)] = value.strip()
+    return values
+
+
+def ensure_config() -> None:
+    os.makedirs(CONFIG_DIR, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(CONFIG_DIR, 0o700)
+    except OSError:
+        pass
+    if not os.path.exists(CONFIG_FILE):
+        write_values({})
+
+
+def write_values(updates: dict[str, str]) -> None:
+    os.makedirs(CONFIG_DIR, mode=0o700, exist_ok=True)
+    current = read_values()
+    current.update({normalize_key(k): str(v) for k, v in updates.items()})
+
+    lines = read_raw()
+    seen: set[str] = set()
+    output: list[str] = []
+    for raw_line in lines:
+        line = raw_line.rstrip("\n")
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = normalize_key(stripped.split("=", 1)[0])
+            if key in current and key not in seen:
+                output.append(f"{key} = {current[key]}")
+                seen.add(key)
+                continue
+            if key in current and key in seen:
+                # Drop duplicate keys.
+                continue
+        output.append(line)
+
+    for key in WRITE_ORDER:
+        if key not in seen and key in current:
+            output.append(f"{key} = {current[key]}")
+            seen.add(key)
+
+    # Append any unknown keys that were explicitly set through `set`.
+    for key, value in current.items():
+        if key not in seen:
+            output.append(f"{key} = {value}")
+
+    fd, tmp_path = tempfile.mkstemp(prefix=".config-", dir=CONFIG_DIR, text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(output) + "\n")
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, CONFIG_FILE)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+def as_json(values: dict[str, str]) -> dict[str, object]:
+    return {
+        "portal": values.get("portal", ""),
+        "gateway": values.get("gateway", ""),
+        "username": values.get("username", ""),
+        "password": values.get("password", ""),
+        "saml": parse_bool(values.get("saml"), True),
+        "totp": values.get("totp", ""),
+        "headless": parse_bool(values.get("headless"), True),
+        "browser": values.get("browser", "default") or "default",
+        "ignoreTlsErrors": parse_bool(values.get("ignore-tls-errors"), False),
+        "fixOpenssl": parse_bool(values.get("fix-openssl"), False),
+        "noDtls": parse_bool(values.get("no-dtls"), False),
+    }
+
+
+def disconnect_if_running() -> None:
+    base = os.path.dirname(os.path.abspath(__file__))
+    status_script = os.path.join(base, "omarchy-globalprotect-status")
+    down_script = os.path.join(base, "omarchy-globalprotect-down")
+    if not os.path.exists(down_script):
+        return
+    try:
+        if os.path.exists(status_script):
+            result = subprocess.run(
+                [status_script],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if '"status":"disconnected"' in (result.stdout or ""):
+                return
+        subprocess.run(
+            [down_script],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def main(argv: Iterable[str]) -> int:
+    args = list(argv)
+    action = args[0] if args else "read-all"
+
+    if action == "read-all":
+        ensure_config()
+        print(json.dumps(as_json(read_values()), ensure_ascii=False))
+        return 0
+
+    if action == "get":
+        if len(args) < 2:
+            print("Usage: omarchy-globalprotect-config get <key>", file=sys.stderr)
+            return 1
+        values = read_values()
+        print(values.get(normalize_key(args[1]), ""))
+        return 0
+
+    if action == "write-all":
+        ensure_config()
+        values = read_values()
+        for index, key in enumerate(WRITE_ORDER, start=1):
+            if index < len(args):
+                values[key] = args[index]
+            elif key in BOOLEAN_KEYS:
+                values[key] = DEFAULTS[key]
+        write_values(values)
+        print("✓ Configuration updated successfully")
+        disconnect_if_running()
+        return 0
+
+    if action == "set":
+        if len(args) < 3:
+            print("Usage: omarchy-globalprotect-config set <key> <value>", file=sys.stderr)
+            return 1
+        ensure_config()
+        write_values({normalize_key(args[1]): args[2]})
+        print("✓ Configuration updated successfully")
+        disconnect_if_running()
+        return 0
+
+    print(
+        "Usage: omarchy-globalprotect-config [read-all|write-all|get|set]",
+        file=sys.stderr,
+    )
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

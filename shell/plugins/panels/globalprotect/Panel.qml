@@ -5,6 +5,7 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import qs.Ui as Ui
 
 Panel {
   id: root
@@ -151,7 +152,7 @@ Panel {
               id: hero
               width: parent.width
               title: vpn.portal !== "" ? vpn.portal : "GlobalProtect VPN"
-              meta: vpn.uiActive ? "VPN Connected" : (vpn.status === "connecting" ? "Connecting…" : (vpn.status === "disconnecting" ? "Disconnecting…" : "VPN Disconnected"))
+              meta: vpn.status === "connecting" ? "Connecting…" : (vpn.status === "disconnecting" ? "Disconnecting…" : (vpn.uiActive ? "VPN Connected" : "VPN Disconnected"))
               foreground: root.foreground
               fontFamily: root.fontFamily
               iconOpacity: vpn.uiActive ? 1.0 : 0.5
@@ -196,6 +197,27 @@ Panel {
 
           PanelSeparator {
             foreground: root.foreground
+          }
+
+          Text {
+            visible: vpn.lastError !== ""
+            width: parent.width
+            text: vpn.lastError
+            color: root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
+
+          Ui.Button {
+            visible: !vpn.pkgInstalled
+            width: parent.width
+            text: "Install globalprotect-openconnect"
+            fontFamily: root.fontFamily
+            fontSize: Style.font.body
+            foreground: root.foreground
+            bordered: true
+            onClicked: vpn.installPackage()
           }
 
           Column {

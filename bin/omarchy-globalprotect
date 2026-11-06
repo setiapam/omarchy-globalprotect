@@ -1,6 +1,6 @@
 #!/bin/bash
 # omarchy:summary=GlobalProtect VPN CLI frontend
-# omarchy:args=[connect|disconnect|status|config|install-deps]
+# omarchy:args=[connect|disconnect|status|auth|config|install-deps]
 
 set -euo pipefail
 
@@ -18,27 +18,51 @@ case "$COMMAND" in
   status)
     "$SCRIPT_DIR/omarchy-globalprotect-status" "$@"
     ;;
+  auth|login)
+    "$SCRIPT_DIR/omarchy-globalprotect-auth" "$@"
+    ;;
   config)
     "$SCRIPT_DIR/omarchy-globalprotect-config" "$@"
     ;;
   install-deps)
+    missing=0
     if ! command -v gpclient >/dev/null 2>&1; then
       echo "Installing globalprotect-openconnect via omarchy-pkg-add..."
       omarchy-pkg-add globalprotect-openconnect
+      missing=1
     else
       echo "✓ globalprotect-openconnect already installed."
+    fi
+    if ! python3 -c "import requests" >/dev/null 2>&1; then
+      echo "Installing python-requests via omarchy-pkg-add..."
+      omarchy-pkg-add python-requests
+      missing=1
+    else
+      echo "✓ python-requests already installed."
+    fi
+    if [[ "$missing" -eq 0 ]]; then
+      echo "✓ All dependencies are installed."
     fi
     ;;
   help|-h|--help)
     cat <<EOF
-Usage: omarchy-globalprotect <command>
+Usage: omarchy-globalprotect <command> [options]
 
 Commands:
   connect, up           Connect to the configured GlobalProtect portal
   disconnect, down      Disconnect active GlobalProtect VPN session
   status                Show connection status (JSON format)
+  auth, login           Run headless SAML + TOTP login and print the auth JSON
   config                Read or write configuration
-  install-deps          Install globalprotect-openconnect package
+  install-deps          Install globalprotect-openconnect and python-requests
+
+Headless auth examples:
+  omarchy-globalprotect auth
+  omarchy-globalprotect auth --dump-dir /tmp/gp-auth
+  omarchy-globalprotect auth --totp GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ
+
+The auth command prints one line of JSON suitable for:
+  gpclient connect <portal> --cookie-on-stdin
 EOF
     ;;
   *)
