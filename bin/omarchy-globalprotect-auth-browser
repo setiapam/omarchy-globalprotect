@@ -290,6 +290,23 @@ function extractSamlRequest(xml) {
   }
 }
 
+function removeStaleProfileLocks(profile) {
+  for (const name of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) {
+    const lockPath = path.join(profile, name);
+    try {
+      const stat = fs.lstatSync(lockPath);
+      if (name === "SingletonLock" && stat.isSymbolicLink()) {
+        const target = fs.readlinkSync(lockPath);
+        const pid = parseInt(String(target).split("-").pop(), 10);
+        if (pid && fs.existsSync(`/proc/${pid}`)) continue;
+      }
+      fs.rmSync(lockPath, { force: true });
+    } catch (_) {
+      // not present
+    }
+  }
+}
+
 function callbackPortFile() {
   const tmp = process.env.TMPDIR || "/tmp";
   return path.join(tmp, "gpcallback.port");
@@ -513,6 +530,7 @@ async function main() {
   fs.mkdirSync(profileRoot, { recursive: true, mode: 0o700 });
   const profile = path.join(profileRoot, "chromium-profile");
   fs.mkdirSync(profile, { recursive: true, mode: 0o700 });
+  removeStaleProfileLocks(profile);
   const port = 9300 + Math.floor(Math.random() * 500);
   const chromiumArgs = [
     `--remote-debugging-port=${port}`,
@@ -558,7 +576,13 @@ async function main() {
     try {
       if (!chromeExited) chrome.kill("SIGKILL");
     } catch (_) {}
-    // Keep the persistent profile; only temporary debug files are removed.
+    // Keep the persistent profile (cookies/clearance), but remove Chromium's
+    // singleton locks after a SIGKILL so the next run can reuse it.
+    for (const name of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) {
+      try {
+        fs.rmSync(path.join(profile, name), { force: true });
+      } catch (_) {}
+    }
   };
   process.on("exit", cleanup);
   process.on("SIGINT", () => {
