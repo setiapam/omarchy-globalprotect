@@ -7,7 +7,9 @@
 # VPN Portal Server
 portal = vpn.bps.go.id
 
-# Optional Gateway (if different from portal, or leave empty)
+# Optional Gateway (if different from portal, or leave empty).
+# Set this when the portal offers several gateways: gpclient 2.5.x removed
+# --auto-gateway and otherwise prompts on a TTY, which fails headlessly.
 gateway =
 
 # Username. For BPS, use the bare username without @bps.go.id.

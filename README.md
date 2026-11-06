@@ -23,14 +23,15 @@ session cookies without opening a browser.
 
 - **Bar Widget**: native Omarchy shell bar widget with connection status and a
   quick toggle.
-- **Headless SAML + TOTP**: a small Python helper walks the Keycloak/SAML flow,
-  generates the TOTP code, and feeds the resulting portal cookies to `gpclient`
-  via `--cookie-on-stdin`. If Keycloak presents Cloudflare Turnstile, a hidden
-  Chromium (Xvfb) completes the challenge; no browser window appears.
-- **Headless gateway auth**: `gpclient` also needs a second SAML login for its
-  gateway. A wrapper automates that in the same hidden Chromium and forwards
-  the callback to `gpclient`. Portal and gateway logins automatically wait for
-  a fresh TOTP window so Keycloak does not reject a replayed code.
+- **Headless SAML + TOTP**: `gpclient` drives the SAML flow through a hidden
+  browser wrapper (Xvfb + Chromium). The wrapper completes Keycloak (password,
+  TOTP, and Cloudflare Turnstile when present) and forwards the portal callback
+  to `gpclient`; the resulting `portal-userauthcookie` is then used for the
+  gateway. No browser window appears.
+- **Headless gateway auth**: if the gateway asks for its own SAML login, the
+  same wrapper runs another hidden Chromium round and forwards that callback
+  too. Portal and gateway logins share a TOTP counter so Keycloak does not
+  reject a replayed code.
 - **Browser fallback**: if you leave the TOTP secret empty, the plugin falls
   back to the normal `gpclient --browser` SAML flow.
 - **Password login**: `saml = false` uses the classic username/password flow.
@@ -106,21 +107,24 @@ The plugin strips `@bps.go.id` automatically if you enter it.
 
 ### How the headless flow works
 
-1. `omarchy-globalprotect-auth` opens
-   `https://vpn.bps.go.id/global-protect/login.esp` and follows the
-   auto-submitting SAML form to Keycloak.
-2. It selects **SSO PEGAWAI BPS**, submits the username and password, and
-   generates the current TOTP code from the stored secret.
-3. It follows the Keycloak → broker → GlobalProtect ACS redirects and extracts
-   `prelogin-cookie` / `portal-userauthcookie` (or the equivalent
-   `globalprotectcallback:` payload).
-4. The JSON auth result is piped to:
-   `gpclient connect vpn.bps.go.id --cookie-on-stdin --browser <wrapper>`.
-5. `gpclient` discovers the gateway. If it needs a second SAML login, it
-   launches the wrapper; the wrapper runs the hidden Chromium again and
-   forwards the gateway callback to `gpclient`.
-6. `gpclient` submits the HIP report required by the BPS gateway
-   (`--hip`), then builds the tunnel. No browser is launched.
+1. `gpclient connect vpn.bps.go.id --browser <wrapper>` starts the portal
+   prelogin. Because SAML is required, it launches the hidden-browser wrapper.
+2. The wrapper starts Chromium under Xvfb and opens gpclient's local auth URL.
+   `omarchy-globalprotect-auth-browser` selects **SSO PEGAWAI BPS**, submits the
+   username and password, generates the current TOTP code, and solves Cloudflare
+   Turnstile if it appears.
+3. It follows the Keycloak → broker → GlobalProtect ACS redirects and forwards
+   the `globalprotectcallback:` payload (or `prelogin-cookie` /
+   `portal-userauthcookie`) to gpclient's auth socket.
+4. `gpclient` fetches the portal config and gets the `portal-userauthcookie`
+   from its own portal session, which the gateway accepts. If the gateway asks
+   for a separate SAML login, the wrapper handles that round too.
+5. `gpclient` submits the HIP report required by the BPS gateway (`--hip`), then
+   builds the tunnel. No browser window is shown.
+
+When the portal offers more than one gateway, set one explicitly in the config
+(`gateway = vpn-gw01.bps.go.id`). `gpclient` 2.5.x removed `--auto-gateway`;
+without `--gateway` it prompts on a TTY and fails in a non-interactive session.
 
 ### Security notes
 
@@ -237,6 +241,19 @@ omarchy-globalprotect up
 
 Check that `pkexec` can elevate and that `/var/run/gpclient.lock` is writable by
 root. Also make sure no other `gpclient` instance is running.
+
+### "The input device is not a TTY"
+
+`gpclient` 2.5.x removed `--auto-gateway`. When the portal lists several
+gateways it prompts for a choice, which fails in the plugin's non-interactive
+session. Set the gateway explicitly:
+
+```bash
+omarchy-globalprotect config set gateway vpn-gw01.bps.go.id
+```
+
+`vpn-gw02.bps.go.id` is the other external BPS gateway if the first one is
+unreachable.
 
 ### Session expires / reconnect
 
