@@ -24,8 +24,13 @@ session cookies without opening a browser.
 - **Bar Widget**: native Omarchy shell bar widget with connection status and a
   quick toggle.
 - **Headless SAML + TOTP**: a small Python helper walks the Keycloak/SAML flow,
-  generates the TOTP code, and feeds the resulting cookies to `gpclient` via
-  `--cookie-on-stdin`. No browser window is shown.
+  generates the TOTP code, and feeds the resulting portal cookies to `gpclient`
+  via `--cookie-on-stdin`. If Keycloak presents Cloudflare Turnstile, a hidden
+  Chromium (Xvfb) completes the challenge; no browser window appears.
+- **Headless gateway auth**: `gpclient` also needs a second SAML login for its
+  gateway. A wrapper automates that in the same hidden Chromium and forwards
+  the callback to `gpclient`. Portal and gateway logins automatically wait for
+  a fresh TOTP window so Keycloak does not reject a replayed code.
 - **Browser fallback**: if you leave the TOTP secret empty, the plugin falls
   back to the normal `gpclient --browser` SAML flow.
 - **Password login**: `saml = false` uses the classic username/password flow.
@@ -52,8 +57,12 @@ omarchy plugin enable setiapam.globalprotect
 Install the dependencies:
 
 ```bash
-omarchy-pkg-add globalprotect-openconnect python-requests
+omarchy-pkg-add globalprotect-openconnect python-requests \
+  nodejs xorg-server-xvfb chromium
 ```
+
+The hidden-browser fallback needs Node.js, Chromium, and `xvfb-run`; it never
+opens a window on your desktop.
 
 `gpclient` needs root privileges for the tunnel, so connecting uses `pkexec`
 (Polkit). Disconnecting uses `pkexec` only when a session is actually active.
@@ -97,8 +106,11 @@ The plugin strips `@bps.go.id` automatically if you enter it.
    `prelogin-cookie` / `portal-userauthcookie` (or the equivalent
    `globalprotectcallback:` payload).
 4. The JSON auth result is piped to:
-   `gpclient connect vpn.bps.go.id --cookie-on-stdin`.
-5. `gpclient` builds the tunnel. No browser is launched.
+   `gpclient connect vpn.bps.go.id --cookie-on-stdin --browser <wrapper>`.
+5. `gpclient` discovers the gateway. If it needs a second SAML login, it
+   launches the wrapper; the wrapper runs the hidden Chromium again and
+   forwards the gateway callback to `gpclient`.
+6. `gpclient` builds the tunnel. No browser is launched.
 
 ### Security notes
 
@@ -140,8 +152,12 @@ omarchy-globalprotect config set totp JBSWY3DPEHPK3PXP
 ### `gpclient` is not installed
 
 ```bash
-omarchy-pkg-add globalprotect-openconnect python-requests
+omarchy-pkg-add globalprotect-openconnect python-requests \
+  nodejs xorg-server-xvfb chromium
 ```
+
+The hidden-browser fallback needs Node.js, Chromium, and `xvfb-run`; it never
+opens a window on your desktop.
 
 If you previously installed the official Palo Alto `PanGPLinux` package
 manually, remove its `/usr/share/applications/gpgui.desktop` (or use pacman's
@@ -172,6 +188,14 @@ the normal "invalid username or password" error), so the widget does not appear
 to be enforced there. If BPS starts enforcing it after valid credentials, the
 helper will report this error; use the browser fallback (`headless = false`) or
 a headed browser implementation.
+
+### "Gateway reports notunnel" / "No IP address received"
+
+When you are on the BPS internal LAN, the internal gateway intentionally
+returns `notunnel` / no tunnel IP: you already have internal network access, so
+no tunnel is created. Disconnect from the internal LAN to use an external
+gateway and get a full tunnel. This is a server-side policy, not an
+authentication failure.
 
 ### The login succeeds but the tunnel does not start
 

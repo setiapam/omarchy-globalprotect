@@ -30,8 +30,11 @@ if [[ -f "$PID_FILE" ]]; then
   rm -f "$PID_FILE"
 fi
 
-# Stop a headless authentication helper that may still be running.
+# Stop a headless authentication helper/browser that may still be running.
 pkill -f "python3 .*omarchy-globalprotect-auth" 2>/dev/null || true
+pkill -f "omarchy-globalprotect-auth-browser" 2>/dev/null || true
+pkill -f "omarchy-globalprotect-browser-wrapper" 2>/dev/null || true
+pkill -f "omarchy-globalprotect/chromium-profile" 2>/dev/null || true
 
 # Best-effort cleanup of older gpauth/gpclient helpers.
 pkill -f "gpclient launch-gui" 2>/dev/null || true

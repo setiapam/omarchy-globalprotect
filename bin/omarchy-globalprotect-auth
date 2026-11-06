@@ -23,7 +23,10 @@ import html as html_mod
 import json
 import os
 import re
+import shutil
+import socket
 import struct
+import subprocess
 import sys
 import time
 import warnings
@@ -43,6 +46,10 @@ except ImportError:  # pragma: no cover - only hit on an incomplete install
 
 
 DEFAULT_CONFIG = os.path.expanduser("~/.config/globalprotect/config")
+BROWSER_HELPER = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "omarchy-globalprotect-auth-browser",
+)
 DEFAULT_PORTAL = "vpn.bps.go.id"
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -56,6 +63,67 @@ class AuthError(Exception):
 
 def log(message: str) -> None:
     print(f"[gp-auth] {message}", file=sys.stderr, flush=True)
+
+
+# ---------------------------------------------------------------------------
+# DNS fallback
+# ---------------------------------------------------------------------------
+
+_ORIGINAL_GETADDRINFO = socket.getaddrinfo
+_DNS_OVERRIDES: dict[str, str] = {}
+
+
+def _patched_getaddrinfo(host, port, *args, **kwargs):
+    if isinstance(host, str):
+        replacement = _DNS_OVERRIDES.get(host)
+        if replacement:
+            host = replacement
+    return _ORIGINAL_GETADDRINFO(host, port, *args, **kwargs)
+
+
+# requests/urllib3 resolve through socket.getaddrinfo. A stale split-DNS rule
+# (for example a BPS internal resolver that is only reachable while connected)
+# can otherwise make the public Keycloak hostname unresolvable. SNI and
+# certificate verification still use the original hostname because urllib3
+# passes it separately to ssl_wrap_socket.
+socket.getaddrinfo = _patched_getaddrinfo
+
+
+def resolve_with_public_dns(host: str) -> Optional[str]:
+    for server in ("1.1.1.1", "8.8.8.8"):
+        try:
+            result = subprocess.run(
+                ["dig", "+short", "+time=3", "+tries=1", f"@{server}", host],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        for line in (result.stdout or "").splitlines():
+            candidate = line.strip().rstrip(".")
+            if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", candidate):
+                return candidate
+    return None
+
+
+def ensure_host_resolution(host: str) -> None:
+    """Use public DNS for a public BPS host if the system resolver fails."""
+    if not host or host in _DNS_OVERRIDES:
+        return
+    try:
+        _ORIGINAL_GETADDRINFO(host, 443, type=socket.SOCK_STREAM)
+        return
+    except OSError:
+        pass
+
+    address = resolve_with_public_dns(host)
+    if address:
+        _DNS_OVERRIDES[host] = address
+        log(f"System DNS failed for {host}; using public DNS fallback")
+    else:
+        log(f"System DNS failed for {host}; public DNS fallback also failed")
 
 
 # ---------------------------------------------------------------------------
@@ -161,13 +229,47 @@ def totp_code(spec: TotpSpec, at: Optional[float] = None, skew: int = 0) -> str:
     return str(number).zfill(spec.digits)
 
 
+TOTP_STATE = os.path.expanduser("~/.cache/omarchy-globalprotect/totp-counter")
+
+
+def read_last_totp_counter() -> int:
+    try:
+        with open(TOTP_STATE, "r", encoding="utf-8") as handle:
+            return int(handle.read().strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def mark_totp_used(spec: TotpSpec) -> None:
+    if spec.static_code or not spec.secret:
+        return
+    counter = int(time.time() // spec.period)
+    try:
+        os.makedirs(os.path.dirname(TOTP_STATE), mode=0o700, exist_ok=True)
+        with open(TOTP_STATE, "w", encoding="utf-8") as handle:
+            handle.write(str(counter))
+        os.chmod(TOTP_STATE, 0o600)
+    except OSError:
+        pass
+
+
 def wait_for_fresh_totp(spec: TotpSpec, minimum_remaining: float = 2.0) -> None:
-    """Avoid submitting a code in the last two seconds of its window."""
+    """Wait until the current TOTP window is fresh and unused.
+
+    Keycloak rejects a replayed TOTP code. Portal and gateway authentication
+    happen back-to-back, so the second login must use the next window.
+    """
     if spec.static_code or not spec.secret:
         return
     remaining = spec.period - (time.time() % spec.period)
     if remaining < minimum_remaining:
         time.sleep(remaining + 0.5)
+
+    last_counter = read_last_totp_counter()
+    while int(time.time() // spec.period) <= last_counter:
+        wait = (last_counter + 1) * spec.period - time.time() + 0.5
+        log(f"Waiting {int(wait) + 1}s for a fresh TOTP window")
+        time.sleep(max(0.5, wait))
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +624,88 @@ def detect_error(page: str) -> Optional[str]:
     return None
 
 
+def run_browser_auth(
+    config_path: str,
+    *,
+    check: bool,
+    dump_dir: Optional[str],
+    timeout: float,
+) -> dict[str, str]:
+    if not os.path.exists(BROWSER_HELPER):
+        raise AuthError(
+            "The hidden-browser helper is missing. Update the plugin to the latest version."
+        )
+
+    node = shutil.which("node")
+    if not node and os.path.exists("/usr/bin/node"):
+        node = "/usr/bin/node"
+    if not node:
+        raise AuthError(
+            "Node.js is required for the hidden-browser fallback. "
+            "Install it with: omarchy-pkg-add nodejs"
+        )
+
+    xvfb_run = shutil.which("xvfb-run")
+    if not xvfb_run:
+        raise AuthError(
+            "xvfb-run is required for the hidden-browser fallback. "
+            "Install it with: omarchy-pkg-add xorg-server-xvfb"
+        )
+
+    browser_timeout = max(120, int(timeout))
+    command = [
+        xvfb_run,
+        "-a",
+        "-s",
+        "-screen 0 1280x900x24",
+        node,
+        BROWSER_HELPER,
+        "--config",
+        config_path,
+        "--timeout",
+        str(browser_timeout),
+    ]
+    if check:
+        command.append("--check")
+    if dump_dir:
+        command.extend(["--dump-dir", dump_dir])
+
+    log("Starting hidden Chromium (no visible window) to pass Turnstile")
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=browser_timeout + 30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise AuthError(f"Could not start the hidden browser: {exc}") from exc
+
+    if result.returncode != 0:
+        detail = "\n".join((result.stderr or "").strip().splitlines()[-5:])
+        raise AuthError(
+            "Hidden-browser login failed."
+            + (f"\n{detail}" if detail else "")
+        )
+
+    if check:
+        return {}
+
+    lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    for line in reversed(lines):
+        if line.startswith("{"):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            auth = payload.get("success")
+            if isinstance(auth, dict):
+                log("Hidden-browser login succeeded")
+                return auth
+    raise AuthError("Hidden-browser helper returned no GlobalProtect auth data")
+
+
 def run_auth(
     *,
     portal: str,
@@ -532,6 +716,9 @@ def run_auth(
     timeout: float,
     verify_tls: bool,
     dump_dir: Optional[str] = None,
+    config_path: str = DEFAULT_CONFIG,
+    check: bool = False,
+    browser_fallback: bool = True,
 ) -> dict[str, str]:
     portal = normalize_portal(portal)
     if not username:
@@ -545,6 +732,12 @@ def run_auth(
     spec = parse_totp_spec(totp)
     if not spec.secret and not spec.static_code:
         raise AuthError("TOTP secret is empty")
+
+    # The BPS portal and Keycloak are public hosts. If a stale split-DNS rule
+    # points bps.go.id at an unreachable internal resolver, fall back to public
+    # DNS for these two names instead of failing the whole login.
+    ensure_host_resolution(portal)
+    ensure_host_resolution("accounts.bps.go.id")
 
     session = requests.Session()
     session.headers.update(
@@ -652,6 +845,7 @@ def run_auth(
         if otp_forms and not submitted_otp:
             wait_for_fresh_totp(spec)
             code = totp_code(spec, skew=totp_skew)
+            mark_totp_used(spec)
             form = otp_forms[0]
             field = find_otp_field(form)
             assert field is not None
@@ -663,6 +857,13 @@ def run_auth(
         # 6. Surface a useful error before trying alternative login methods.
         error = detect_error(response.text or "")
         if error:
+            if browser_fallback and ("Turnstile" in error or "CAPTCHA" in error):
+                return run_browser_auth(
+                    config_path,
+                    check=check,
+                    dump_dir=dump_dir,
+                    timeout=timeout,
+                )
             raise AuthError(error)
 
         # 7. Keycloak "Try another way" / authenticator chooser.
@@ -730,6 +931,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Only verify the login; do not print the session cookies",
     )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not fall back to hidden Chromium when Turnstile is required",
+    )
     return parser
 
 
@@ -758,6 +964,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             timeout=args.timeout,
             verify_tls=not ignore_tls,
             dump_dir=args.dump_dir,
+            config_path=args.config,
+            check=args.check,
+            browser_fallback=not args.no_browser,
         )
     except AuthError as exc:
         log(f"ERROR: {exc}")

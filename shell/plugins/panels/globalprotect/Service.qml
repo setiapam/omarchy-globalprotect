@@ -101,7 +101,7 @@ Item {
 
   Process {
     id: installProc
-    command: ["omarchy-launch-terminal", "omarchy-pkg-add", "globalprotect-openconnect", "python-requests"]
+    command: ["omarchy-launch-terminal", "omarchy-pkg-add", "globalprotect-openconnect", "python-requests", "nodejs", "xorg-server-xvfb", "chromium"]
     onExited: function() { root.refresh() }
   }
 

@@ -25,24 +25,9 @@ case "$COMMAND" in
     "$SCRIPT_DIR/omarchy-globalprotect-config" "$@"
     ;;
   install-deps)
-    missing=0
-    if ! command -v gpclient >/dev/null 2>&1; then
-      echo "Installing globalprotect-openconnect via omarchy-pkg-add..."
-      omarchy-pkg-add globalprotect-openconnect
-      missing=1
-    else
-      echo "✓ globalprotect-openconnect already installed."
-    fi
-    if ! python3 -c "import requests" >/dev/null 2>&1; then
-      echo "Installing python-requests via omarchy-pkg-add..."
-      omarchy-pkg-add python-requests
-      missing=1
-    else
-      echo "✓ python-requests already installed."
-    fi
-    if [[ "$missing" -eq 0 ]]; then
-      echo "✓ All dependencies are installed."
-    fi
+    echo "Installing GlobalProtect, Python, Node, Chromium, and Xvfb dependencies..."
+    omarchy-pkg-add globalprotect-openconnect python-requests nodejs xorg-server-xvfb chromium
+    echo "✓ Dependencies installed."
     ;;
   help|-h|--help)
     cat <<EOF

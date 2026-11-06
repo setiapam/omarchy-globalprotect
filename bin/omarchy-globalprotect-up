@@ -14,6 +14,8 @@ PID_FILE="$RUN_DIR/${CONFIG_NAME}.pid"
 LOCK_FILE="$RUN_DIR/${CONFIG_NAME}.lock"
 ERROR_FILE="$RUN_DIR/${CONFIG_NAME}.error"
 AUTH_LOG="$RUN_DIR/${CONFIG_NAME}-auth.log"
+GP_LOG="$RUN_DIR/${CONFIG_NAME}-gpclient.log"
+BROWSER_WRAPPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/omarchy-globalprotect-browser-wrapper"
 
 rm -f "$ERROR_FILE"
 
@@ -120,6 +122,10 @@ if [[ "$SAML" == "true" && "$HEADLESS" == "true" && -n "$TOTP" ]]; then
     notify_error "Error: authentication helper is not executable: $AUTH_BIN"
     exit 1
   fi
+  if [[ ! -x "$BROWSER_WRAPPER" ]]; then
+    notify_error "Error: hidden-browser wrapper is not executable: $BROWSER_WRAPPER"
+    exit 1
+  fi
 
   echo "==> Performing headless SAML login with TOTP..."
   : > "$AUTH_LOG"
@@ -135,7 +141,8 @@ if [[ "$SAML" == "true" && "$HEADLESS" == "true" && -n "$TOTP" ]]; then
     exit 1
   fi
 
-  printf '%s\n' "$AUTH_JSON" | pkexec env "${ENV_ARGS[@]}" gpclient "${GLOBAL_ARGS[@]}" "${CONNECT_ARGS[@]}" --cookie-on-stdin &
+  : > "$GP_LOG"
+  printf '%s\n' "$AUTH_JSON" | pkexec env "${ENV_ARGS[@]}" gpclient "${GLOBAL_ARGS[@]}" "${CONNECT_ARGS[@]}" --cookie-on-stdin --browser "$BROWSER_WRAPPER" >"$GP_LOG" 2>&1 &
   VPN_PID=$!
   echo "$VPN_PID" > "$PID_FILE"
 
@@ -148,6 +155,7 @@ if [[ "$SAML" == "true" && "$HEADLESS" == "true" && -n "$TOTP" ]]; then
 
   rm -f "$PID_FILE"
   detail=$(tail -n 1 "$AUTH_LOG" 2>/dev/null || true)
+  [[ -n "$detail" ]] || detail=$(tail -n 1 "$GP_LOG" 2>/dev/null || true)
   notify_error "GlobalProtect connection ended during startup.${detail:+ $detail}"
   exit 1
 fi
@@ -159,7 +167,8 @@ if [[ "$SAML" == "true" ]]; then
     omarchy-notification-send "GlobalProtect" "TOTP not configured; opening browser login" 2>/dev/null || true
   fi
   [[ -n "$BROWSER" ]] && CONNECT_ARGS+=("--browser" "$BROWSER")
-  pkexec env "${ENV_ARGS[@]}" gpclient "${GLOBAL_ARGS[@]}" "${CONNECT_ARGS[@]}" &
+  : > "$GP_LOG"
+  pkexec env "${ENV_ARGS[@]}" gpclient "${GLOBAL_ARGS[@]}" "${CONNECT_ARGS[@]}" >"$GP_LOG" 2>&1 &
   VPN_PID=$!
   echo "$VPN_PID" > "$PID_FILE"
 
@@ -182,7 +191,8 @@ if [[ -z "$PASSWORD" ]]; then
 fi
 
 CONNECT_ARGS+=("--passwd-on-stdin")
-printf '%s\n' "$PASSWORD" | pkexec env "${ENV_ARGS[@]}" gpclient "${GLOBAL_ARGS[@]}" "${CONNECT_ARGS[@]}" &
+: > "$GP_LOG"
+printf '%s\n' "$PASSWORD" | pkexec env "${ENV_ARGS[@]}" gpclient "${GLOBAL_ARGS[@]}" "${CONNECT_ARGS[@]}" >"$GP_LOG" 2>&1 &
 VPN_PID=$!
 echo "$VPN_PID" > "$PID_FILE"
 

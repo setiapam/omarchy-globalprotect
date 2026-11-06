@@ -1,0 +1,1027 @@
+#!/usr/bin/env node
+/*
+ * Hidden-browser fallback for GlobalProtect SAML login.
+ *
+ * The BPS Keycloak login enforces a Cloudflare Turnstile challenge once the
+ * username/password are valid. Plain HTTP clients cannot solve that challenge,
+ * so this helper drives a real Chromium window on a virtual X display
+ * (xvfb-run) and reads the GlobalProtect cookies from the SAML ACS response.
+ *
+ * It is started by `omarchy-globalprotect-auth` only when the HTTP flow hits
+ * Turnstile. The browser is never shown on the real desktop.
+ */
+
+"use strict";
+
+const { spawn, execFileSync } = require("node:child_process");
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const https = require("node:https");
+const net = require("node:net");
+const os = require("node:os");
+const path = require("node:path");
+
+const DEFAULT_CONFIG = path.join(os.homedir(), ".config/globalprotect/config");
+const DEFAULT_PORTAL = "vpn.bps.go.id";
+const CHROMIUM = process.env.CHROMIUM_BIN || "/usr/bin/chromium";
+const USER_AGENT =
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36";
+const GP_PRELOGIN_USER_AGENT = "PAN GlobalProtect/6.3.3-619 (Linux Omarchy)";
+const GP_WEBVIEW_USER_AGENT =
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/602.1 " +
+  "(KHTML, like Gecko) PanGPUI Version/10.0 Safari/602.1";
+
+class AuthError extends Error {}
+
+function log(message) {
+  console.error(`[gp-browser] ${message}`);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseArgs(argv) {
+  const args = {
+    config: DEFAULT_CONFIG,
+    check: false,
+    dumpDir: "",
+    timeout: 120,
+    ignoreTls: false,
+    authUrl: "",
+    format: "json",
+    forwardCallback: false,
+  };
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === "--config") args.config = argv[++i];
+    else if (arg === "--check") args.check = true;
+    else if (arg === "--dump-dir") args.dumpDir = argv[++i];
+    else if (arg === "--timeout") args.timeout = Number(argv[++i]) || 120;
+    else if (arg === "--ignore-tls-errors") args.ignoreTls = true;
+    else if (arg === "--auth-url") args.authUrl = argv[++i];
+    else if (arg === "--format") args.format = argv[++i];
+    else if (arg === "--forward-callback") args.forwardCallback = true;
+    else if (arg === "--help" || arg === "-h") {
+      console.log(
+        "Usage: omarchy-globalprotect-auth-browser [--config FILE] " +
+          "[--check] [--dump-dir DIR] [--timeout SECONDS] [--ignore-tls-errors] " +
+          "[--auth-url URL] [--format json|callback] [--forward-callback]",
+      );
+      process.exit(0);
+    } else {
+      throw new AuthError(`Unknown argument: ${arg}`);
+    }
+  }
+  return args;
+}
+
+function readConfig(file) {
+  const values = {};
+  for (const rawLine of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#") || !line.includes("=")) continue;
+    const index = line.indexOf("=");
+    const key = line
+      .slice(0, index)
+      .trim()
+      .toLowerCase()
+      .replace(/_/g, "-");
+    values[key] = line.slice(index + 1).trim();
+  }
+  return values;
+}
+
+function normalizeSecret(secret) {
+  return String(secret || "")
+    .replace(/[\s-]/g, "")
+    .toUpperCase()
+    .replace(/=+$/, "");
+}
+
+function parseTotp(value) {
+  const text = String(value || "").trim();
+  if (!text) throw new AuthError("TOTP secret is empty");
+  if (/^otpauth:\/\//i.test(text)) {
+    const url = new URL(text);
+    const secret = normalizeSecret(url.searchParams.get("secret") || "");
+    const digits = Number(url.searchParams.get("digits") || 6);
+    const period = Number(url.searchParams.get("period") || 30);
+    const algorithm = (url.searchParams.get("algorithm") || "SHA1").toUpperCase();
+    return { secret, digits, period, algorithm, staticCode: "" };
+  }
+  if (/^\d{6,8}$/.test(text)) {
+    return { secret: "", digits: text.length, period: 30, algorithm: "SHA1", staticCode: text };
+  }
+  return {
+    secret: normalizeSecret(text),
+    digits: 6,
+    period: 30,
+    algorithm: "SHA1",
+    staticCode: "",
+  };
+}
+
+function base32Decode(secret) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const normalized = normalizeSecret(secret);
+  let bits = "";
+  for (const char of normalized) {
+    const value = alphabet.indexOf(char);
+    if (value < 0) throw new AuthError(`Invalid Base32 character in TOTP secret: ${char}`);
+    bits += value.toString(2).padStart(5, "0");
+  }
+  const bytes = [];
+  for (let i = 0; i + 8 <= bits.length; i += 8) {
+    bytes.push(parseInt(bits.slice(i, i + 8), 2));
+  }
+  return Buffer.from(bytes);
+}
+
+function totpCode(spec) {
+  if (spec.staticCode) return spec.staticCode;
+  if (!spec.secret) throw new AuthError("TOTP secret is empty");
+  const key = base32Decode(spec.secret);
+  const counter = Math.floor(Date.now() / 1000 / spec.period);
+  const buffer = Buffer.alloc(8);
+  buffer.writeBigUInt64BE(BigInt(counter));
+  const digest = crypto
+    .createHmac(spec.algorithm.toLowerCase(), key)
+    .update(buffer)
+    .digest();
+  const offset = digest[digest.length - 1] & 0x0f;
+  const number =
+    (digest.readUInt32BE(offset) & 0x7fffffff) % 10 ** spec.digits;
+  return String(number).padStart(spec.digits, "0");
+}
+
+const TOTP_STATE = path.join(
+  os.homedir(),
+  ".cache/omarchy-globalprotect/totp-counter",
+);
+
+function readLastTotpCounter() {
+  try {
+    return parseInt(fs.readFileSync(TOTP_STATE, "utf8").trim(), 10) || 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
+function markTotpUsed(spec) {
+  if (spec.staticCode || !spec.secret) return;
+  const counter = Math.floor(Date.now() / 1000 / spec.period);
+  try {
+    fs.mkdirSync(path.dirname(TOTP_STATE), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(TOTP_STATE, String(counter), { mode: 0o600 });
+    fs.chmodSync(TOTP_STATE, 0o600);
+  } catch (_) {
+    // non-fatal
+  }
+}
+
+async function waitForFreshTotp(spec) {
+  if (spec.staticCode || !spec.secret) return;
+  const remaining = spec.period - (Date.now() / 1000) % spec.period;
+  if (remaining < 2) await sleep((remaining + 0.5) * 1000);
+
+  const lastCounter = readLastTotpCounter();
+  while (Math.floor(Date.now() / 1000 / spec.period) <= lastCounter) {
+    const wait =
+      (lastCounter + 1) * spec.period * 1000 - Date.now() + 500;
+    log(`Waiting ${Math.ceil(wait / 1000)}s for a fresh TOTP window`);
+    await sleep(Math.max(500, wait));
+  }
+}
+
+function systemDns(host) {
+  try {
+    const output = execFileSync("getent", ["hosts", host], {
+      encoding: "utf8",
+      timeout: 5000,
+    });
+    for (const line of output.split(/\r?\n/)) {
+      const fields = line.trim().split(/\s+/);
+      if (fields.length && /^\d{1,3}(?:\.\d{1,3}){3}$/.test(fields[0])) {
+        return fields[0];
+      }
+    }
+  } catch (_) {
+    // fall through
+  }
+  return null;
+}
+
+function publicDns(host) {
+  for (const server of ["1.1.1.1", "8.8.8.8"]) {
+    try {
+      const output = execFileSync(
+        "dig",
+        ["+short", "+time=3", "+tries=1", `@${server}`, host],
+        { encoding: "utf8", timeout: 8000 },
+      );
+      for (const line of output.split(/\r?\n/)) {
+        const candidate = line.trim().replace(/\.$/, "");
+        if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(candidate)) return candidate;
+      }
+    } catch (_) {
+      // try the next resolver
+    }
+  }
+  return null;
+}
+
+function postPrelogin(portal, username, ignoreTls) {
+  const address = systemDns(portal) || publicDns(portal);
+  const body = new URLSearchParams({
+    tmp: "tmp",
+    username,
+    clientVer: "4100",
+    clientos: "Linux",
+    clientgpversion: "6.0.0",
+  }).toString();
+
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: portal,
+      port: 443,
+      path: "/global-protect/prelogin.esp",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Length": Buffer.byteLength(body),
+        "User-Agent": GP_PRELOGIN_USER_AGENT,
+      },
+      rejectUnauthorized: !ignoreTls,
+      servername: portal,
+    };
+    if (address) {
+      options.lookup = (_hostname, lookupOptions, callback) => {
+        if (lookupOptions && lookupOptions.all) {
+          callback(null, [{ address, family: 4 }]);
+        } else {
+          callback(null, address, 4);
+        }
+      };
+    }
+    const request = https.request(options, (response) => {
+      let data = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => {
+        data += chunk;
+      });
+      response.on("end", () => resolve(data));
+    });
+    request.setTimeout(30000, () => request.destroy(new Error("Prelogin timed out")));
+    request.on("error", reject);
+    request.write(body);
+    request.end();
+  });
+}
+
+function extractSamlRequest(xml) {
+  const match = String(xml || "").match(/<saml-request>(.*?)<\/saml-request>/is);
+  if (!match) return null;
+  try {
+    return Buffer.from(match[1].trim(), "base64").toString("utf8");
+  } catch (_) {
+    return null;
+  }
+}
+
+function callbackPortFile() {
+  const tmp = process.env.TMPDIR || "/tmp";
+  return path.join(tmp, "gpcallback.port");
+}
+
+function forwardCallbackViaTcp(callback) {
+  return new Promise((resolve, reject) => {
+    let port = 0;
+    try {
+      port = parseInt(fs.readFileSync(callbackPortFile(), "utf8").trim(), 10) || 0;
+    } catch (_) {
+      reject(new Error("no gpcallback.port file"));
+      return;
+    }
+    if (!port) {
+      reject(new Error("gpcallback.port is empty"));
+      return;
+    }
+    log(`Sending authentication callback to 127.0.0.1:${port}`);
+    const socket = net.createConnection({ host: "127.0.0.1", port });
+    const timer = setTimeout(() => {
+      socket.destroy();
+      resolve();
+    }, 5000);
+    socket.on("connect", () => {
+      socket.end(callback);
+    });
+    socket.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    socket.on("close", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+function callbackSocketPaths() {
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  return [
+    `/run/user/${uid}/gp-connect/auth-callback.sock`,
+    `/tmp/gp-connect-${uid}/auth-callback.sock`,
+  ];
+}
+
+function failureCallback() {
+  const html = "<html><body><saml-auth-status>0</saml-auth-status></body></html>";
+  return "globalprotectcallback:" + Buffer.from(html, "utf8").toString("base64");
+}
+
+function forwardCallbackViaUnixSocket(callback) {
+  const paths = callbackSocketPaths();
+  return new Promise((resolve, reject) => {
+    let index = 0;
+    const tryNext = () => {
+      if (index >= paths.length) {
+        reject(new Error("No waiting gpauth callback socket was found"));
+        return;
+      }
+      const socketPath = paths[index++];
+      log(`Trying callback socket ${socketPath}`);
+      const socket = net.createConnection(socketPath);
+      let response = Buffer.alloc(0);
+      let settled = false;
+      const retry = () => {
+        if (settled) return;
+        settled = true;
+        socket.destroy();
+        tryNext();
+      };
+      socket.on("connect", () => {
+        const payload = Buffer.from(callback, "utf8");
+        const header = Buffer.alloc(9);
+        header.write("GPAC", 0, "ascii");
+        header.writeUInt8(1, 4);
+        header.writeUInt32BE(payload.length, 5);
+        socket.write(Buffer.concat([header, payload]));
+      });
+      socket.on("data", (chunk) => {
+        response = Buffer.concat([response, chunk]);
+        if (response.length < 2) return;
+        settled = true;
+        socket.end();
+        const version = response[0];
+        const status = response[1];
+        if (version !== 1) reject(new Error("Callback protocol version mismatch"));
+        else if (status !== 0) reject(new Error(`Callback was rejected (status ${status})`));
+        else resolve();
+      });
+      socket.on("error", (error) => {
+        log(`Callback socket ${socketPath} failed: ${error.code || error.message}`);
+        retry();
+      });
+      socket.on("close", () => {
+        if (!settled) retry();
+      });
+    };
+    tryNext();
+  });
+}
+
+async function forwardCallbackToSocket(callback) {
+  try {
+    await forwardCallbackViaTcp(callback);
+    return;
+  } catch (error) {
+    log(`TCP callback failed: ${error.message}; trying Unix socket`);
+  }
+  await forwardCallbackViaUnixSocket(callback);
+}
+
+function htmlDecode(value) {
+  return String(value || "")
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, num) => String.fromCodePoint(Number(num)))
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+function extractTag(html, name) {
+  const match = String(html || "").match(
+    new RegExp(`<${name}>(.*?)</${name}>`, "is"),
+  );
+  return match ? htmlDecode(match[1]).trim() : "";
+}
+
+function parseAuthHtml(html) {
+  const status = extractTag(html, "saml-auth-status");
+  if (status && status !== "1") {
+    const message = extractTag(html, "msg") || extractTag(html, "newmsg");
+    throw new AuthError(
+      `GlobalProtect rejected the SAML login (saml-auth-status=${status})` +
+        (message ? `: ${message}` : ""),
+    );
+  }
+  const username = extractTag(html, "saml-username");
+  const preloginCookie = extractTag(html, "prelogin-cookie");
+  const portalUserauthcookie = extractTag(html, "portal-userauthcookie");
+  const token = extractTag(html, "token");
+  if (!preloginCookie && !portalUserauthcookie && !token) return null;
+  const auth = { username };
+  if (preloginCookie) auth.preloginCookie = preloginCookie;
+  if (portalUserauthcookie) auth.portalUserauthcookie = portalUserauthcookie;
+  if (token) auth.token = token;
+  return auth;
+}
+
+function parseCallback(raw) {
+  let value = htmlDecode(raw).trim().replace(/^["']|["']$/g, "").replace(/;$/, "");
+  value = value.replace(/^\/+/, "");
+  if (!value) return null;
+  if (value.startsWith("cas-as")) {
+    const params = new URLSearchParams(value);
+    const auth = {};
+    if (params.get("un")) auth.username = params.get("un");
+    if (params.get("token")) auth.token = params.get("token");
+    return Object.keys(auth).length ? auth : null;
+  }
+  try {
+    const decoded = Buffer.from(decodeURIComponent(value), "base64").toString("utf8");
+    return parseAuthHtml(decoded);
+  } catch (_) {
+    return null;
+  }
+}
+
+function extractAuth(candidates) {
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const text = String(candidate);
+    const matches = text.match(/globalprotectcallback:\s*[^\s"'<>]+/gi) || [];
+    for (const match of matches) {
+      const auth = parseCallback(match.replace(/^globalprotectcallback:\s*/i, ""));
+      if (auth) return auth;
+    }
+    const auth = parseAuthHtml(text);
+    if (auth) return auth;
+  }
+  return null;
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const config = readConfig(args.config);
+  const portal = (config.portal || DEFAULT_PORTAL)
+    .replace(/^https?:\/\//i, "")
+    .replace(/\/.*$/, "");
+  const username = (config.username || "").replace(/@bps\.go\.id$/i, "");
+  const password = config.password || "";
+  const totpSpec = parseTotp(config.totp);
+  const ignoreTls =
+    args.ignoreTls || /^(1|true|yes|on)$/i.test(config["ignore-tls-errors"] || "");
+
+  if (!username) throw new AuthError("Username is empty");
+  if (!password) throw new AuthError("Password is empty");
+  if (!process.env.DISPLAY) {
+    throw new AuthError(
+      "No X display. Run this helper through xvfb-run (or install xorg-server-xvfb).",
+    );
+  }
+  if (!fs.existsSync(CHROMIUM)) {
+    throw new AuthError(`Chromium not found at ${CHROMIUM}`);
+  }
+
+  const accountHost = "accounts.bps.go.id";
+  // Prefer the system resolver (internal DNS on the BPS LAN). Only override a
+  // hostname when the system resolver cannot answer it.
+  const accountIp = systemDns(accountHost) ? null : publicDns(accountHost);
+  const portalIp = systemDns(portal) ? null : publicDns(portal);
+  const resolverRules = [];
+  if (accountIp) resolverRules.push(`MAP ${accountHost} ${accountIp}`);
+  if (portalIp) resolverRules.push(`MAP ${portal} ${portalIp}`);
+
+  // Reuse a dedicated profile so Cloudflare's clearance cookie and the
+  // Keycloak SSO session survive between runs. The directory is private.
+  const profileRoot = path.join(os.homedir(), ".cache/omarchy-globalprotect");
+  fs.mkdirSync(profileRoot, { recursive: true, mode: 0o700 });
+  const profile = path.join(profileRoot, "chromium-profile");
+  fs.mkdirSync(profile, { recursive: true, mode: 0o700 });
+  const port = 9300 + Math.floor(Math.random() * 500);
+  const chromiumArgs = [
+    `--remote-debugging-port=${port}`,
+    `--user-data-dir=${profile}`,
+    "--no-sandbox",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-dev-shm-usage",
+    "--lang=en-US",
+    "--disable-blink-features=AutomationControlled",
+    "--window-size=1280,900",
+  ];
+  if (resolverRules.length) {
+    chromiumArgs.push(`--host-resolver-rules=${resolverRules.join(",")}`);
+  }
+  if (ignoreTls) chromiumArgs.push("--ignore-certificate-errors");
+  chromiumArgs.push("about:blank");
+
+  log(`Starting hidden Chromium for ${portal}`);
+  const chrome = spawn(CHROMIUM, chromiumArgs, {
+    stdio: ["ignore", "ignore", "ignore"],
+    detached: true,
+    env: { ...process.env, DISPLAY: process.env.DISPLAY },
+  });
+
+  let ws = null;
+  let acsRequestId = null;
+  let acsBody = "";
+  let acsLocation = "";
+  let acsHeaders = {};
+  let chromeExited = false;
+  chrome.on("exit", () => {
+    chromeExited = true;
+  });
+
+  const cleanup = () => {
+    try {
+      if (ws) ws.close();
+    } catch (_) {}
+    try {
+      if (!chromeExited) process.kill(-chrome.pid, "SIGKILL");
+    } catch (_) {}
+    try {
+      if (!chromeExited) chrome.kill("SIGKILL");
+    } catch (_) {}
+    // Keep the persistent profile; only temporary debug files are removed.
+  };
+  process.on("exit", cleanup);
+  process.on("SIGINT", () => {
+    cleanup();
+    process.exit(130);
+  });
+  process.on("SIGTERM", () => {
+    cleanup();
+    process.exit(143);
+  });
+
+  try {
+    const target = await waitForTarget(port, () => chromeExited);
+    ws = new WebSocket(target.webSocketDebuggerUrl);
+    await new Promise((resolve, reject) => {
+      ws.onopen = resolve;
+      ws.onerror = reject;
+    });
+
+    let nextId = 0;
+    const pending = new Map();
+    const send = (method, params = {}) =>
+      new Promise((resolve, reject) => {
+        const id = ++nextId;
+        pending.set(id, { resolve, reject });
+        ws.send(JSON.stringify({ id, method, params }));
+      });
+
+    ws.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      if (message.id && pending.has(message.id)) {
+        const { resolve, reject } = pending.get(message.id);
+        pending.delete(message.id);
+        if (message.error) reject(new Error(JSON.stringify(message.error)));
+        else resolve(message.result);
+        return;
+      }
+      if (message.method === "Network.requestWillBeSent" && message.params.type === "Document") {
+        log(`Document request: ${message.params.request.url}`);
+      }
+      if (message.method === "Network.responseReceived") {
+        const response = message.params.response;
+        if (message.params.type === "Document") {
+          log(`Document response: ${response.status} ${response.url}${response.headers && response.headers.Location ? " -> " + response.headers.Location : ""}`);
+        }
+        if (response.url.includes("/SAML20/SP/ACS") || response.url.includes("getsoftwarepage")) {
+          log(`Network: ${response.status} ${response.url}`);
+          if (response.headers && response.headers.Location) {
+            log(`Network location: ${response.headers.Location}`);
+          }
+          if (response.url.includes("/SAML20/SP/ACS")) {
+            acsRequestId = message.params.requestId;
+            acsHeaders = response.headers || {};
+            if (acsHeaders.Location) acsLocation = acsHeaders.Location;
+          }
+        }
+      }
+      if (
+        message.method === "Network.loadingFinished" &&
+        acsRequestId &&
+        message.params.requestId === acsRequestId
+      ) {
+        send("Network.getResponseBody", { requestId: acsRequestId })
+          .then((result) => {
+            acsBody = result.base64Encoded
+              ? Buffer.from(result.body, "base64").toString("utf8")
+              : result.body;
+            log(`Captured ACS body (${acsBody.length} bytes, callback=${acsBody.includes("globalprotectcallback:")})`);
+          })
+          .catch(() => {});
+      }
+    };
+
+    await send("Page.enable");
+    await send("Runtime.enable");
+    await send("Network.enable");
+
+    const evaluate = async (expression) => {
+      const result = await send("Runtime.evaluate", {
+        expression,
+        returnByValue: true,
+        awaitPromise: true,
+      });
+      if (result.exceptionDetails) {
+        throw new AuthError(
+          result.exceptionDetails.text || "JavaScript evaluation failed",
+        );
+      }
+      return result.result ? result.result.value : undefined;
+    };
+
+    const snapshot = async () => {
+      const value = await evaluate(`(() => {
+        const q = (s) => document.querySelector(s);
+        const html = document.documentElement ? document.documentElement.outerHTML : "";
+        const text = document.body ? document.body.innerText : "";
+        const sso = [...document.querySelectorAll("a[href]")].find(
+          (a) => /broker.*pegawai|pegawai.*broker/i.test(a.href)
+        );
+        const ts =
+          window.turnstile && window.turnstile.getResponse
+            ? window.turnstile.getResponse()
+            : "";
+        let box = null;
+        const widget = q(".cf-turnstile");
+        if (widget) {
+          const rect = widget.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            box = { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
+          }
+        }
+        return {
+          url: location.href,
+          title: document.title,
+          text: text.slice(0, 3000),
+          html,
+          hasPassword: !!q('input[name="password"]'),
+          hasUsername: !!q('input[name="username"]'),
+          hasOtp: !!(q('input[name="otp"]') || q('input[name="totp"]') || q('input[name="code"]')),
+          hasTryAnother:
+            !!q('input[name="tryAnotherWay"]') || /try another way/i.test(text),
+          sso: sso ? sso.href : null,
+          turnstile: ts,
+          box,
+          hasCallback: html.includes("globalprotectcallback:"),
+        };
+      })()`);
+      return value;
+    };
+
+    const clickAt = async (x, y) => {
+      await send("Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: Math.max(0, x - 60),
+        y: Math.max(0, y - 20),
+      });
+      await sleep(150);
+      await send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+      await sleep(150);
+      await send("Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        x,
+        y,
+        button: "left",
+        clickCount: 1,
+      });
+      await sleep(90);
+      await send("Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        x,
+        y,
+        button: "left",
+        clickCount: 1,
+      });
+    };
+
+    const fill = async (selector, value) => {
+      const encoded = JSON.stringify(value);
+      await evaluate(`(() => {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        if (!el) return false;
+        el.focus();
+        el.value = ${encoded};
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+      })()`);
+    };
+
+    const submitForm = async (selector) => {
+      await evaluate(`(() => {
+        const form = document.querySelector(${JSON.stringify(selector)});
+        if (!form) return false;
+        if (!form.querySelector('[name="login"]')) {
+          const hidden = document.createElement("input");
+          hidden.type = "hidden";
+          hidden.name = "login";
+          hidden.value = "Sign In";
+          form.appendChild(hidden);
+        }
+        form.submit();
+        return true;
+      })()`);
+    };
+
+    const clickOtpAlternative = async () => {
+      return evaluate(`(() => {
+        const wanted = /authenticator|one[- ]time|otp|verification code|aplikasi authenticator/i;
+        const avoid = /passkey|webauthn|security key|recovery code/i;
+        const elements = [...document.querySelectorAll("a, button, input[type=submit]")];
+        const target = elements.find((el) => {
+          const text = (el.innerText || el.value || el.getAttribute("aria-label") || "").trim();
+          return wanted.test(text) && !avoid.test(text);
+        });
+        if (target) {
+          target.click();
+          return true;
+        }
+        return false;
+      })()`);
+    };
+
+    if (args.authUrl) {
+      log("Opening the gpclient authentication URL");
+      await send("Page.navigate", { url: args.authUrl });
+    } else {
+      log("Requesting the GlobalProtect SAML request");
+      const preloginXml = await postPrelogin(portal, username, ignoreTls);
+      const samlHtml = extractSamlRequest(preloginXml);
+      if (!samlHtml) {
+        throw new AuthError(
+          "Prelogin did not return a SAML request. The portal may not be configured for SAML.",
+        );
+      }
+      const frameTree = await send("Page.getFrameTree");
+      const frameId = frameTree.frameTree.frame.id;
+      await send("Page.setDocumentContent", { frameId, html: samlHtml });
+      await sleep(400);
+      try {
+        await evaluate("document.getElementById('myform')?.submit();");
+      } catch (_) {
+        // The inline auto-submit may already have navigated.
+      }
+      log("Submitted the GlobalProtect SAML request");
+    }
+
+    let ssoSelected = false;
+    let credentialsSubmitted = false;
+    let otpSubmitted = false;
+    let alternativeAttempts = 0;
+    let turnstileClicks = 0;
+    let widgetFirstSeen = 0;
+    let passwordSince = 0;
+    let reloadAttempts = 0;
+    let lastReload = Date.now();
+    let lastUrl = "";
+    const deadline = Date.now() + args.timeout * 1000;
+
+    while (Date.now() < deadline) {
+      const state = await snapshot();
+      if (state.url !== lastUrl) {
+        lastUrl = state.url;
+        log(`Page: ${state.title || "(untitled)"} ${state.url}`);
+      }
+
+      const auth = extractAuth([
+        state.hasCallback ? state.html : "",
+        acsLocation,
+        acsBody,
+      ]);
+      if (auth) {
+        if (!auth.username) auth.username = username;
+        log("SAML authentication succeeded");
+        if (args.check) {
+          console.log("Authentication OK");
+        } else if (args.format === "callback") {
+          let callback =
+            (String(state.html || "").match(/globalprotectcallback:\s*[^\s"'<>]+/i) || [])[0] ||
+            (acsLocation || "");
+          if (!callback) {
+            const body = acsBody || state.html || "";
+            callback =
+              "globalprotectcallback:" +
+              Buffer.from(body, "utf8").toString("base64");
+          }
+          if (args.forwardCallback) {
+            await forwardCallbackToSocket(callback);
+            console.log("Authentication OK");
+          } else {
+            console.log(callback);
+          }
+        } else {
+          console.log(JSON.stringify({ success: auth }));
+        }
+        cleanup();
+        process.exit(0);
+      }
+
+      if (/SAML20\/SP\/ACS/i.test(state.url) && (acsBody || acsLocation)) {
+        continue;
+      }
+
+      if (state.sso && !ssoSelected) {
+        log("Selecting SSO PEGAWAI BPS");
+        await send("Page.navigate", { url: state.sso });
+        ssoSelected = true;
+        await sleep(1000);
+        continue;
+      }
+
+      if (state.hasPassword && !credentialsSubmitted) {
+        if (!passwordSince) passwordSince = Date.now();
+        if (!state.turnstile) {
+          if (state.box && state.box.h > 40) {
+            if (!widgetFirstSeen) widgetFirstSeen = Date.now();
+            if (turnstileClicks < 6 && Date.now() - widgetFirstSeen > 2500) {
+              const x = state.box.x + 18;
+              const y = state.box.y + state.box.h / 2;
+              log(`Clicking the Cloudflare verification checkbox at ${Math.round(x)},${Math.round(y)} (box ${JSON.stringify(state.box)})`);
+              if (args.dumpDir) {
+                try {
+                  fs.mkdirSync(args.dumpDir, { recursive: true, mode: 0o700 });
+                  const shot = await send("Page.captureScreenshot", { format: "png" });
+                  fs.writeFileSync(path.join(args.dumpDir, `turnstile-${turnstileClicks + 1}.png`), Buffer.from(shot.data, "base64"));
+                } catch (_) {}
+              }
+              await clickAt(x, y);
+              turnstileClicks += 1;
+              await sleep(2500);
+              continue;
+            }
+          } else if (Date.now() - passwordSince > 15000) {
+            // No widget at all: try submitting anyway. If the server requires
+            // Turnstile, the resulting page will report it.
+            log("No Turnstile widget detected; submitting credentials");
+            await fill("#username", username);
+            await fill("#password", password);
+            await submitForm("#kc-form-login");
+            credentialsSubmitted = true;
+            await sleep(2000);
+            continue;
+          }
+          if (
+            turnstileClicks >= 6 &&
+            reloadAttempts < 2 &&
+            Date.now() - lastReload > 10000
+          ) {
+            log("Reloading the login page to retry Turnstile");
+            await send("Page.reload", { ignoreCache: true });
+            reloadAttempts += 1;
+            lastReload = Date.now();
+            turnstileClicks = 0;
+            widgetFirstSeen = 0;
+            passwordSince = 0;
+            await sleep(3000);
+            continue;
+          }
+          await sleep(500);
+          continue;
+        }
+
+        log("Submitting username and password");
+        await fill("#username", username);
+        await fill("#password", password);
+        await submitForm("#kc-form-login");
+        credentialsSubmitted = true;
+        await sleep(2000);
+        continue;
+      }
+
+      if (state.hasOtp && !otpSubmitted) {
+        await waitForFreshTotp(totpSpec);
+        const code = totpCode(totpSpec);
+        markTotpUsed(totpSpec);
+        const field = await evaluate(`(() => {
+          if (document.querySelector('input[name="otp"]')) return "otp";
+          if (document.querySelector('input[name="totp"]')) return "totp";
+          if (document.querySelector('input[name="code"]')) return "code";
+          return null;
+        })()`);
+        log(`Submitting TOTP (${String(code).length} digits)`);
+        // The portal only emits the globalprotectcallback: payload for its
+        // own webview. Switch to the PanGPUI user agent for the final ACS POST.
+        await send("Network.setUserAgentOverride", {
+          userAgent: GP_WEBVIEW_USER_AGENT,
+        });
+        await fill(`input[name="${field}"]`, code);
+        await submitForm("form");
+        otpSubmitted = true;
+        await sleep(2000);
+        continue;
+      }
+
+      if (state.hasTryAnother && alternativeAttempts < 4 && !state.hasOtp) {
+        const clicked = await evaluate(`(() => {
+          const link = document.querySelector("#try-another-way");
+          if (link) { link.click(); return true; }
+          return false;
+        })()`);
+        if (clicked) {
+          log("Opening alternative login methods");
+          alternativeAttempts += 1;
+          await sleep(1500);
+          continue;
+        }
+        if (await clickOtpAlternative()) {
+          log("Selecting authenticator app / OTP");
+          alternativeAttempts += 1;
+          await sleep(1500);
+          continue;
+        }
+      }
+
+      const text = state.text.toLowerCase();
+      if (text.includes("invalid username or password")) {
+        throw new AuthError("Username or password is incorrect.");
+      }
+      if (text.includes("invalid authenticator code") || text.includes("invalid code")) {
+        throw new AuthError("The TOTP code was rejected.");
+      }
+      if (text.includes("captcha verification is required") && !state.turnstile) {
+        if (turnstileClicks < 6 && state.box && state.box.h > 40) {
+          const x = state.box.x + 18;
+          const y = state.box.y + state.box.h / 2;
+          log("CAPTCHA required; clicking the verification checkbox");
+          await clickAt(x, y);
+          turnstileClicks += 1;
+          await sleep(2500);
+          continue;
+        }
+        throw new AuthError(
+          "Cloudflare Turnstile did not issue a token. Try again or use browser mode.",
+        );
+      }
+
+      await sleep(500);
+    }
+
+    if (args.dumpDir) {
+      try {
+        fs.mkdirSync(args.dumpDir, { recursive: true, mode: 0o700 });
+        const state = await snapshot();
+        fs.writeFileSync(path.join(args.dumpDir, "browser-last.html"), state.html || "");
+      } catch (_) {}
+    }
+    throw new AuthError(
+      "Timed out waiting for the GlobalProtect SAML login to finish. " +
+        `Last page: ${lastUrl || "(unknown)"}`,
+    );
+  } catch (error) {
+    if (args.forwardCallback) {
+      try {
+        await forwardCallbackToSocket(failureCallback());
+      } catch (_) {
+        // The caller will still see the original browser error.
+      }
+    }
+    throw error;
+  } finally {
+    cleanup();
+  }
+}
+
+async function waitForTarget(port, isExited) {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    if (isExited()) throw new AuthError("Chromium exited before CDP became available");
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/json/version`);
+      if (response.ok) {
+        const pages = await fetch(`http://127.0.0.1:${port}/json/list`).then((r) => r.json());
+        const page = pages.find((entry) => entry.type === "page");
+        if (page) return page;
+      }
+    } catch (_) {
+      // Chromium is still starting
+    }
+    await sleep(250);
+  }
+  throw new AuthError("Timed out waiting for Chromium's remote debugging endpoint");
+}
+
+main().catch((error) => {
+  log(`ERROR: ${error.message || error}`);
+  if (process.env.GP_BROWSER_DEBUG) console.error(error.stack);
+  process.exit(2);
+});

@@ -8,6 +8,7 @@ CONFIG_NAME="${1:-config}"
 RUN_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omarchy-globalprotect"
 PID_FILE="$RUN_DIR/${CONFIG_NAME}.pid"
 ERROR_FILE="$RUN_DIR/${CONFIG_NAME}.error"
+GP_LOG="$RUN_DIR/${CONFIG_NAME}-gpclient.log"
 CONFIG_FILE="$HOME/.config/globalprotect/$CONFIG_NAME"
 
 status="disconnected"
@@ -29,18 +30,18 @@ if [[ -f "$ERROR_FILE" ]]; then
   last_error=$(tr '\n\t' '  ' < "$ERROR_FILE" 2>/dev/null | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | cut -c1-300 || true)
 fi
 
-# Prefer the gpclient process, which is the authoritative signal. Also accept
-# a gpd* interface, but do not treat an unrelated tun* (another VPN) as ours.
-vpn_dev=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^gpd[0-9]*$' | head -1 || true)
+# The tunnel interface is the authoritative "connected" signal. While only
+# the gpclient process exists, the client is still authenticating/connecting.
+vpn_dev=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^(gpd|tun)[0-9]*$' | head -1 || true)
 
 # Find an active gpclient process. This catches the brief period before the
 # tunnel device appears.
 active_pid=$(pgrep -f "gpclient connect" 2>/dev/null | head -1 || true)
 
-# The headless SAML helper runs before gpclient starts.
-auth_pid=$(pgrep -f "python3 .*omarchy-globalprotect-auth" 2>/dev/null | head -1 || true)
+# The headless SAML helper and hidden browser run before/while gpclient starts.
+auth_pid=$(pgrep -f "python3 .*omarchy-globalprotect-auth|omarchy-globalprotect-auth-browser|omarchy-globalprotect-browser-wrapper" 2>/dev/null | head -1 || true)
 
-if [[ -n "$active_pid" || -n "$vpn_dev" ]]; then
+if [[ -n "$vpn_dev" ]]; then
   status="connected"
   pid="${active_pid:-}"
   if [[ -n "$pid" && -d "/proc/$pid" ]]; then
@@ -50,9 +51,9 @@ if [[ -n "$active_pid" || -n "$vpn_dev" ]]; then
       uptime_secs=$(( now - start_time ))
     fi
   fi
-elif [[ -n "$auth_pid" ]]; then
+elif [[ -n "$active_pid" || -n "$auth_pid" ]]; then
   status="connecting"
-  pid="$auth_pid"
+  pid="${active_pid:-$auth_pid}"
 elif [[ -f "$PID_FILE" ]]; then
   file_pid=$(cat "$PID_FILE" 2>/dev/null || echo "")
   if [[ -n "$file_pid" ]] && kill -0 "$file_pid" 2>/dev/null; then
@@ -60,6 +61,15 @@ elif [[ -f "$PID_FILE" ]]; then
     pid="$file_pid"
   else
     rm -f "$PID_FILE"
+  fi
+fi
+
+# If gpclient exited, surface its last useful error in the panel.
+if [[ "$status" == "disconnected" && -z "$last_error" && -f "$GP_LOG" ]]; then
+  if grep -qaE 'notunnel|No IP address received' "$GP_LOG"; then
+    last_error="Gateway reports notunnel/no tunnel (client is on the internal network; no tunnel is required)."
+  else
+    last_error=$(grep -aE 'Error:|ERROR|auth-failed|Failed to connect|Failed to parse' "$GP_LOG" 2>/dev/null | tail -1 | tr '\n\t' '  ' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | cut -c1-300 || true)
   fi
 fi
 

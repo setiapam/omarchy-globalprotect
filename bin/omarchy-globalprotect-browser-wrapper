@@ -1,0 +1,50 @@
+#!/bin/bash
+# Browser wrapper used by gpclient's external-browser SAML flow.
+#
+# gpclient launches this with a local http://127.0.0.1:... auth URL. We open
+# that URL in a hidden Chromium, complete the Keycloak login (including TOTP
+# and Turnstile), then forward the resulting globalprotectcallback payload to
+# the gpauth callback socket that is waiting for it.
+
+set -euo pipefail
+
+AUTH_URL="${1:-}"
+if [[ -z "$AUTH_URL" ]]; then
+  echo "omarchy-globalprotect-browser-wrapper: missing authentication URL" >&2
+  exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HELPER="$SCRIPT_DIR/omarchy-globalprotect-auth-browser"
+
+NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
+XVFB_BIN="${XVFB_BIN:-$(command -v xvfb-run || true)}"
+
+if [[ -z "$NODE_BIN" || -z "$XVFB_BIN" ]]; then
+  echo "omarchy-globalprotect-browser-wrapper: node and xvfb-run are required" >&2
+  exit 1
+fi
+
+if [[ ! -x "$HELPER" ]]; then
+  echo "omarchy-globalprotect-browser-wrapper: browser helper is not executable: $HELPER" >&2
+  exit 1
+fi
+
+LOG="${XDG_RUNTIME_DIR:-/tmp}/omarchy-globalprotect-browser.log"
+: > "$LOG" 2>/dev/null || true
+
+set +e
+"$XVFB_BIN" -a -s "-screen 0 1280x900x24" \
+  "$NODE_BIN" "$HELPER" \
+  --auth-url "$AUTH_URL" \
+  --format callback \
+  --forward-callback \
+  2>>"$LOG"
+STATUS=$?
+set -e
+
+if [[ "$STATUS" -ne 0 ]]; then
+  echo "omarchy-globalprotect-browser-wrapper: authentication failed (see $LOG)" >&2
+fi
+
+exit "$STATUS"
