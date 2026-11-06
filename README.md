@@ -65,8 +65,17 @@ omarchy-pkg-add globalprotect-openconnect python-requests \
 The hidden-browser fallback needs Node.js, Chromium, and `xvfb-run`; it never
 opens a window on your desktop.
 
-`gpclient` needs root privileges for the tunnel, so connecting uses `pkexec`
-(Polkit). Disconnecting uses `pkexec` only when a session is actually active.
+`gpclient` needs root privileges for the tunnel. Install the passwordless
+helper once (this is safe to re-run after plugin updates):
+
+```bash
+~/.config/omarchy/plugins/setiapam.globalprotect/install-gp-helper.sh
+```
+
+It installs `/usr/local/lib/omarchy/globalprotect-helper` and a sudoers rule
+that whitelists only that helper, mirroring the OpenFortiVPN plugin. Connects
+and disconnects then run without a sudo or Polkit prompt. If the helper is not
+installed, the plugin falls back to `pkexec`.
 
 When developing from a local checkout, changes to plugin QML are only picked up
 after a shell restart. Omarchy's plugin hot-reload rescans the manifest but
@@ -173,11 +182,11 @@ omarchy-pkg-add globalprotect-openconnect python-requests \
 The hidden-browser fallback needs Node.js, Chromium, and `xvfb-run`; it never
 opens a window on your desktop.
 
-If you previously installed the official Palo Alto `PanGPLinux` package
-manually, remove its `/usr/share/applications/gpgui.desktop` (or use pacman's
-`--overwrite`) if pacman reports a file conflict. The open-source package
-provides `gpclient`, `gpauth`, and `gpservice`; it does not replace the official
-`PanGPS` daemon.
+The open-source package provides `gpclient`, `gpauth`, `gpservice`, and its own
+HIP script. If you previously installed the closed-source Palo Alto
+`PanGPLinux` client (`/opt/paloaltonetworks`, `gpd.service`,
+`gpgui.desktop`), remove it first: its `gpgui.desktop` conflicts with this
+package, and this plugin does not use the `PanGPS` daemon.
 
 ### "Username or password is incorrect"
 
@@ -244,9 +253,9 @@ root. Also make sure no other `gpclient` instance is running.
 
 ### "The input device is not a TTY"
 
-`gpclient` 2.5.x removed `--auto-gateway`. When the portal lists several
-gateways it prompts for a choice, which fails in the plugin's non-interactive
-session. Set the gateway explicitly:
+`gpclient` 2.5.x removed `--auto-gateway`, and the plugin's session is
+non-interactive. On 2.6+ the helper uses `--auto-gateway` when `gateway` is
+empty. On 2.5.x (or if auto-selection fails), set a gateway explicitly:
 
 ```bash
 omarchy-globalprotect config set gateway vpn-gw01.bps.go.id

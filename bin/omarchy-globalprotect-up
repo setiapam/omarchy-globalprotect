@@ -16,6 +16,12 @@ ERROR_FILE="$RUN_DIR/${CONFIG_NAME}.error"
 AUTH_LOG="$RUN_DIR/${CONFIG_NAME}-auth.log"
 GP_LOG="$RUN_DIR/${CONFIG_NAME}-gpclient.log"
 BROWSER_WRAPPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/omarchy-globalprotect-browser-wrapper"
+HELPER="/usr/local/lib/omarchy/globalprotect-helper"
+CALLING_USER="$(id -un)"
+
+helper_available() {
+  [[ -x "$HELPER" ]] && sudo -n -l "$HELPER" >/dev/null 2>&1
+}
 
 rm -f "$ERROR_FILE"
 
@@ -175,7 +181,11 @@ if [[ "$SAML" == "true" && "$HEADLESS" == "true" && -n "$TOTP" ]]; then
 
   echo "==> Performing headless SAML login with TOTP..."
   : > "$GP_LOG"
-  "${SETSID_PREFIX[@]}" pkexec env "${ENV_ARGS[@]}" gpclient "${GLOBAL_ARGS[@]}" "${CONNECT_ARGS[@]}" --browser "$BROWSER_WRAPPER" >"$GP_LOG" 2>&1 &
+  if helper_available; then
+    "${SETSID_PREFIX[@]}" sudo -n "$HELPER" connect "$CALLING_USER" "$CONFIG_NAME" >"$GP_LOG" 2>&1 &
+  else
+    "${SETSID_PREFIX[@]}" pkexec env "${ENV_ARGS[@]}" gpclient "${GLOBAL_ARGS[@]}" "${CONNECT_ARGS[@]}" --browser "$BROWSER_WRAPPER" >"$GP_LOG" 2>&1 &
+  fi
   VPN_PID=$!
   echo "$VPN_PID" > "$PID_FILE"
 
@@ -208,7 +218,11 @@ if [[ "$SAML" == "true" ]]; then
   fi
   [[ -n "$BROWSER" ]] && CONNECT_ARGS+=("--browser" "$BROWSER")
   : > "$GP_LOG"
-  "${SETSID_PREFIX[@]}" pkexec env "${ENV_ARGS[@]}" gpclient "${GLOBAL_ARGS[@]}" "${CONNECT_ARGS[@]}" >"$GP_LOG" 2>&1 &
+  if helper_available; then
+    "${SETSID_PREFIX[@]}" sudo -n "$HELPER" connect "$CALLING_USER" "$CONFIG_NAME" >"$GP_LOG" 2>&1 &
+  else
+    "${SETSID_PREFIX[@]}" pkexec env "${ENV_ARGS[@]}" gpclient "${GLOBAL_ARGS[@]}" "${CONNECT_ARGS[@]}" >"$GP_LOG" 2>&1 &
+  fi
   VPN_PID=$!
   echo "$VPN_PID" > "$PID_FILE"
 
@@ -234,7 +248,11 @@ fi
 
 CONNECT_ARGS+=("--passwd-on-stdin")
 : > "$GP_LOG"
-printf '%s\n' "$PASSWORD" | "${SETSID_PREFIX[@]}" pkexec env "${ENV_ARGS[@]}" gpclient "${GLOBAL_ARGS[@]}" "${CONNECT_ARGS[@]}" >"$GP_LOG" 2>&1 &
+if helper_available; then
+  "${SETSID_PREFIX[@]}" sudo -n "$HELPER" connect "$CALLING_USER" "$CONFIG_NAME" >"$GP_LOG" 2>&1 &
+else
+  printf '%s\n' "$PASSWORD" | "${SETSID_PREFIX[@]}" pkexec env "${ENV_ARGS[@]}" gpclient "${GLOBAL_ARGS[@]}" "${CONNECT_ARGS[@]}" >"$GP_LOG" 2>&1 &
+fi
 VPN_PID=$!
 echo "$VPN_PID" > "$PID_FILE"
 

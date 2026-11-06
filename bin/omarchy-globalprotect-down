@@ -13,12 +13,17 @@ AUTH_LOG="$RUN_DIR/${CONFIG_NAME}-auth.log"
 echo "==> Disconnecting GlobalProtect VPN..."
 
 # gpclient runs as root. Its lock file contains the PID of the active client.
-# Use pkexec only when there is actually something to stop, so a simple
-# disconnect does not always trigger a polkit prompt.
+# Prefer the sudoers-whitelisted helper so disconnecting does not prompt; fall
+# back to pkexec when the helper is not installed.
+HELPER="/usr/local/lib/omarchy/globalprotect-helper"
 if command -v gpclient >/dev/null 2>&1; then
   if [[ -f /var/run/gpclient.lock || -f "$PID_FILE" ]] || pgrep -f "gpclient connect" >/dev/null 2>&1; then
-    pkexec env TMPDIR=/tmp gpclient disconnect --wait 3 >/dev/null 2>&1 || \
-      gpclient disconnect --wait 3 >/dev/null 2>&1 || true
+    if [[ -x "$HELPER" ]] && sudo -n -l "$HELPER" >/dev/null 2>&1; then
+      sudo -n "$HELPER" disconnect >/dev/null 2>&1 || true
+    else
+      pkexec env TMPDIR=/tmp gpclient disconnect --wait 3 >/dev/null 2>&1 || \
+        gpclient disconnect --wait 3 >/dev/null 2>&1 || true
+    fi
   fi
 fi
 

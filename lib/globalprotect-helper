@@ -1,0 +1,151 @@
+#!/bin/bash
+# globalprotect-helper — root-owned, sudoers-whitelisted helper
+#
+# This script is the ONLY path listed in the sudoers NOPASSWD rule. It
+# validates all inputs before invoking gpclient as root, mirroring the
+# openfortivpn-helper pattern used by the OpenFortiVPN Omarchy plugin.
+#
+# Usage (via sudo):
+#   sudo /usr/local/lib/omarchy/globalprotect-helper connect <user> [config_name]
+#   sudo /usr/local/lib/omarchy/globalprotect-helper disconnect
+#
+# Installed to: /usr/local/lib/omarchy/globalprotect-helper
+# Owner:        root:root, mode 0755
+
+set -euo pipefail
+
+readonly GPC="/usr/bin/gpclient"
+readonly CONFIG_BASE_DIR="/home"
+readonly CONFIG_SUBPATH=".config/globalprotect"
+readonly PLUGIN_SUBPATH=".config/omarchy/plugins/setiapam.globalprotect/bin"
+readonly CONFIG_NAME_RE='^[a-zA-Z0-9][a-zA-Z0-9._-]*$'
+readonly MAX_CONFIG_NAME_LEN=64
+readonly ALLOWED_ACTIONS="connect|disconnect"
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+ACTION="${1:-}"
+[[ -n "$ACTION" ]] || die "missing action argument"
+[[ "$ACTION" =~ ^($ALLOWED_ACTIONS)$ ]] || die "invalid action '$ACTION' (allowed: $ALLOWED_ACTIONS)"
+
+# ── disconnect: stop the active gpclient ─────────────────────────────
+if [[ "$ACTION" == "disconnect" ]]; then
+  "$GPC" disconnect --wait 3 >/dev/null 2>&1 ||
+    /usr/bin/pkill -f 'gpclient connect' 2>/dev/null || true
+  exit 0
+fi
+
+# ── connect: validate caller and config name ─────────────────────────
+CALLING_USER="${2:-}"
+CONFIG_NAME="${3:-config}"
+
+[[ -n "$CALLING_USER" ]] || die "missing user argument"
+[[ "$CALLING_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "invalid username '$CALLING_USER'"
+[[ "$CALLING_USER" != "root" ]] || die "refusing to run for root"
+id "$CALLING_USER" >/dev/null 2>&1 || die "user '$CALLING_USER' does not exist"
+
+[[ ${#CONFIG_NAME} -le $MAX_CONFIG_NAME_LEN ]] ||
+  die "config name too long (max $MAX_CONFIG_NAME_LEN chars)"
+[[ "$CONFIG_NAME" =~ $CONFIG_NAME_RE ]] ||
+  die "invalid config name '$CONFIG_NAME' (must match $CONFIG_NAME_RE)"
+[[ "$CONFIG_NAME" != *"/"* ]] || die "config name must not contain '/'"
+[[ "$CONFIG_NAME" != *".."* ]] || die "config name must not contain '..'"
+
+CALLING_UID="$(id -u "$CALLING_USER")"
+CALLING_HOME="$(getent passwd "$CALLING_USER" | cut -d: -f6)"
+CONFIG_DIR="$CONFIG_BASE_DIR/$CALLING_USER/$CONFIG_SUBPATH"
+CONFIG_FILE="$CONFIG_DIR/$CONFIG_NAME"
+
+CANONICAL_DIR="$(readlink -f "$CONFIG_DIR" 2>/dev/null)" || die "cannot resolve config directory"
+CANONICAL_FILE="$(readlink -f "$CONFIG_FILE" 2>/dev/null)" || die "config file not found: $CONFIG_FILE"
+case "$CANONICAL_FILE" in
+  "$CANONICAL_DIR"/*) ;;
+  *) die "config file resolves outside allowed directory" ;;
+esac
+
+[[ -f "$CANONICAL_FILE" ]] || die "config file not found: $CONFIG_FILE"
+[[ -r "$CANONICAL_FILE" ]] || die "config file not readable: $CONFIG_FILE"
+
+get_cfg() {
+  local key="$1" line
+  line=$(grep -i "^[[:space:]]*${key}[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null | head -1 || true)
+  if [[ -n "$line" ]]; then
+    echo "$line" | sed 's/^[^=]*=[[:space:]]*//' | sed 's/[[:space:]]*$//'
+  else
+    echo ""
+  fi
+}
+
+lower() { printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'; }
+
+PORTAL="$(get_cfg portal)"
+[[ -n "$PORTAL" ]] || die "portal is not configured in $CONFIG_FILE"
+PORTAL="${PORTAL#https://}"
+PORTAL="${PORTAL#http://}"
+PORTAL="${PORTAL%/}"
+
+GATEWAY="$(get_cfg gateway)"
+USERNAME="$(get_cfg username)"
+PASSWORD="$(get_cfg password)"
+SAML="$(lower "$(get_cfg saml)")"
+TOTP="$(get_cfg totp)"
+HEADLESS="$(lower "$(get_cfg headless)")"
+BROWSER="$(get_cfg browser)"
+IGNORE_TLS="$(lower "$(get_cfg ignore-tls-errors)")"
+FIX_OPENSSL="$(lower "$(get_cfg fix-openssl)")"
+NO_DTLS="$(lower "$(get_cfg no-dtls)")"
+
+SAML="${SAML:-true}"
+HEADLESS="${HEADLESS:-true}"
+BROWSER="${BROWSER:-default}"
+
+GLOBAL_ARGS=()
+CONNECT_ARGS=("connect" "$PORTAL")
+
+[[ "$IGNORE_TLS" == "true" ]] && GLOBAL_ARGS+=("--ignore-tls-errors")
+[[ "$FIX_OPENSSL" == "true" ]] && GLOBAL_ARGS+=("--fix-openssl")
+
+if [[ -n "$GATEWAY" ]]; then
+  CONNECT_ARGS+=("--gateway" "$GATEWAY")
+else
+  CONNECT_ARGS+=("--auto-gateway")
+fi
+
+CONNECT_ARGS+=("--hip")
+[[ "$NO_DTLS" == "true" ]] && CONNECT_ARGS+=("--no-dtls")
+[[ -n "$USERNAME" ]] && CONNECT_ARGS+=("--user" "$USERNAME")
+
+# ── choose the authentication path ───────────────────────────────────
+if [[ "$SAML" == "true" && "$HEADLESS" == "true" && -n "$TOTP" ]]; then
+  WRAPPER="$CALLING_HOME/$PLUGIN_SUBPATH/omarchy-globalprotect-browser-wrapper"
+  [[ -x "$WRAPPER" ]] || die "hidden-browser wrapper is not executable: $WRAPPER"
+  [[ "$(stat -c '%u' "$WRAPPER")" == "$CALLING_UID" ]] ||
+    die "hidden-browser wrapper is not owned by $CALLING_USER"
+  WRAPPER_MODE="$(stat -c '%a' "$WRAPPER")"
+  if (( (8#$WRAPPER_MODE & 8#7022) != 0 )); then
+    die "hidden-browser wrapper has unsafe permissions (must be 0755)"
+  fi
+  CONNECT_ARGS+=("--browser" "$WRAPPER")
+elif [[ "$SAML" == "true" ]]; then
+  CONNECT_ARGS+=("--browser" "$BROWSER")
+else
+  [[ -n "$PASSWORD" ]] || die "password is empty for non-SAML authentication"
+  CONNECT_ARGS+=("--passwd-on-stdin")
+fi
+
+# ── run gpclient with the invoking user's session environment ────────
+export HOME="$CALLING_HOME"
+export TMPDIR=/tmp
+export XDG_RUNTIME_DIR="/run/user/$CALLING_UID"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$CALLING_UID/bus"
+[[ -n "${DISPLAY:-}" ]] && export DISPLAY
+[[ -n "${WAYLAND_DISPLAY:-}" ]] && export WAYLAND_DISPLAY
+[[ -n "${XAUTHORITY:-}" ]] && export XAUTHORITY
+
+[[ -x "$GPC" ]] || die "gpclient not found at $GPC"
+
+if [[ "$SAML" == "true" ]]; then
+  exec "$GPC" "${GLOBAL_ARGS[@]}" "${CONNECT_ARGS[@]}"
+else
+  printf '%s\n' "$PASSWORD" | "$GPC" "${GLOBAL_ARGS[@]}" "${CONNECT_ARGS[@]}"
+fi
