@@ -542,6 +542,10 @@ async function main() {
     "--lang=en-US",
     "--disable-blink-features=AutomationControlled",
     "--window-size=1280,900",
+    // Always render into the Xvfb display. Chromium auto-selects Wayland when
+    // WAYLAND_DISPLAY is present, which would put this window on the real
+    // desktop even though DISPLAY points at Xvfb.
+    "--ozone-platform=x11",
   ];
   if (resolverRules.length) {
     chromiumArgs.push(`--host-resolver-rules=${resolverRules.join(",")}`);
@@ -549,11 +553,18 @@ async function main() {
   if (ignoreTls) chromiumArgs.push("--ignore-certificate-errors");
   chromiumArgs.push("about:blank");
 
+  // Drop the desktop's Wayland sockets: gpclient inherits them from the user
+  // session, and Chromium would otherwise ignore DISPLAY and draw the "hidden"
+  // login window on the real compositor.
+  const chromeEnv = { ...process.env, DISPLAY: process.env.DISPLAY };
+  delete chromeEnv.WAYLAND_DISPLAY;
+  delete chromeEnv.WAYLAND_SOCKET;
+
   log(`Starting hidden Chromium for ${portal}`);
   const chrome = spawn(CHROMIUM, chromiumArgs, {
     stdio: ["ignore", "ignore", "ignore"],
     detached: true,
-    env: { ...process.env, DISPLAY: process.env.DISPLAY },
+    env: chromeEnv,
   });
 
   let ws = null;
