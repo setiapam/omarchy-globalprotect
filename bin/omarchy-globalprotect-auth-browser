@@ -705,6 +705,14 @@ async function main() {
             box = { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
           }
         }
+        const cfIframes = [...document.querySelectorAll("iframe")].map((f) => {
+          const r = f.getBoundingClientRect();
+          return {
+            src: String(f.src || "").slice(0, 90),
+            x: r.x, y: r.y, w: r.width, h: r.height,
+          };
+        }).filter((f) => /cloudflare|turnstile|challenge/i.test(f.src) || (f.w > 0 && f.h > 0));
+        const tsApi = typeof window.turnstile;
         return {
           url: location.href,
           title: document.title,
@@ -718,6 +726,8 @@ async function main() {
           sso: sso ? sso.href : null,
           turnstile: ts,
           box,
+          cfIframes,
+          tsApi,
           hasCallback: html.includes("globalprotectcallback:"),
         };
       })()`);
@@ -825,6 +835,7 @@ async function main() {
     let otpSubmitted = false;
     let alternativeAttempts = 0;
     let turnstileClicks = 0;
+    let lastTurnstileClick = 0;
     let widgetFirstSeen = 0;
     let passwordSince = 0;
     let reloadAttempts = 0;
@@ -889,7 +900,15 @@ async function main() {
         if (!state.turnstile) {
           if (state.box && state.box.h > 40) {
             if (!widgetFirstSeen) widgetFirstSeen = Date.now();
-            if (turnstileClicks < 6 && Date.now() - widgetFirstSeen > 2500) {
+            // Turnstile first paints as "Verifying…" and only later issues a
+            // token. Poking the checkbox too early resets that check, so give
+            // it a few seconds and rate-limit the clicks.
+            const waited = Date.now() - widgetFirstSeen;
+            if (
+              waited > 4000 &&
+              turnstileClicks < 6 &&
+              Date.now() - lastTurnstileClick > 8000
+            ) {
               const x = state.box.x + 18;
               const y = state.box.y + state.box.h / 2;
               log(`Clicking the Cloudflare verification checkbox at ${Math.round(x)},${Math.round(y)} (box ${JSON.stringify(state.box)})`);
@@ -902,18 +921,11 @@ async function main() {
               }
               await clickAt(x, y);
               turnstileClicks += 1;
+              lastTurnstileClick = Date.now();
               await sleep(2500);
               continue;
             }
-          } else if (Date.now() - passwordSince > 15000) {
-            // No widget at all: try submitting anyway. If the server requires
-            // Turnstile, the resulting page will report it.
-            log("No Turnstile widget detected; submitting credentials");
-            await fill("#username", username);
-            await fill("#password", password);
-            await submitForm("#kc-form-login");
-            credentialsSubmitted = true;
-            await sleep(2000);
+            await sleep(500);
             continue;
           }
           if (
@@ -929,6 +941,32 @@ async function main() {
             widgetFirstSeen = 0;
             passwordSince = 0;
             await sleep(3000);
+            continue;
+          }
+          // The challenge script can take a long time to render on remote or
+          // slow links; it used to give up after 15s and submit without a
+          // token, which only guarantees a rejection. Wait well past the
+          // first paint before trying anyway, and recover if the server still
+          // asks for a CAPTCHA (handled after the submit below).
+          if (Date.now() - passwordSince > 30000) {
+            log(
+              `No Turnstile widget detected after 30s; submitting credentials ` +
+                `(box=${JSON.stringify(state.box)} api=${state.tsApi} ` +
+                `iframes=${JSON.stringify(state.cfIframes)})`,
+            );
+            await fill("#username", username);
+            await fill("#password", password);
+            await submitForm("#kc-form-login");
+            credentialsSubmitted = true;
+            if (args.dumpDir) {
+              try {
+                fs.mkdirSync(args.dumpDir, { recursive: true, mode: 0o700 });
+                const shot = await send("Page.captureScreenshot", { format: "png" });
+                fs.writeFileSync(path.join(args.dumpDir, "no-widget.png"), Buffer.from(shot.data, "base64"));
+                fs.writeFileSync(path.join(args.dumpDir, "no-widget.html"), state.html || "");
+              } catch (_) {}
+            }
+            await sleep(2000);
             continue;
           }
           await sleep(500);
@@ -1001,9 +1039,32 @@ async function main() {
           log("CAPTCHA required; clicking the verification checkbox");
           await clickAt(x, y);
           turnstileClicks += 1;
+          lastTurnstileClick = Date.now();
           await sleep(2500);
           continue;
         }
+        // The credentials were submitted before Turnstile finished, so the
+        // server rejected the attempt. Restart the login form and let the
+        // widget render instead of failing the whole login.
+        if (reloadAttempts < 2) {
+          log("CAPTCHA required but no widget yet; restarting the login form");
+          reloadAttempts += 1;
+          credentialsSubmitted = false;
+          otpSubmitted = false;
+          ssoSelected = false;
+          widgetFirstSeen = 0;
+          passwordSince = 0;
+          turnstileClicks = 0;
+          await send("Page.navigate", { url: state.url }).catch(() => {});
+          await sleep(3000);
+          continue;
+        }
+        log(
+          `CAPTCHA required but no clickable widget ` +
+            `(box=${JSON.stringify(state.box)} api=${state.tsApi} ` +
+            `token=${JSON.stringify(String(state.turnstile || "").slice(0, 12))} ` +
+            `iframes=${JSON.stringify(state.cfIframes)})`,
+        );
         throw new AuthError(
           "Cloudflare Turnstile did not issue a token. Try again or use browser mode.",
         );
